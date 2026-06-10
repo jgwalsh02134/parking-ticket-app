@@ -1,0 +1,909 @@
+import { useState, useMemo, useRef, useEffect } from "react";
+import {
+  Shield, Sun, Moon, Check, Clock, Info, Mail, Copy, MapPin, Upload,
+  Receipt, Car, Signpost, ParkingMeter, FileText, TriangleAlert, HeartPulse,
+  MessageSquare, Loader2, X, CheckCircle2, Scale, ExternalLink,
+  FolderOpen, FileSearch, Send, ArrowLeft, Printer, Gavel,
+  Search, Camera, Building2,
+} from "lucide-react";
+import { apiRequest } from "@/lib/queryClient";
+import {
+  TicketForm, emptyForm, SITUATIONS, DEFENSES, strengthLabel,
+  fmtDate, deadlineInfo, buildLetter, BUREAU_AUTHORITY,
+  FoilForm, emptyFoil, FOIL_RECORDS, suggestedFoilRecords,
+  FOIL_AUTHORITY, FOIL_CONTACT, buildFoilLetter,
+  FoilAppealForm, emptyFoilAppeal, FOIL_APPEAL_REASONS, FoilAppealReason,
+  FOIL_APPEAL_AUTHORITY, FOIL_APPEAL_CONTACT, buildFoilAppealLetter,
+  LOOKUP_STATES, LOOKUP_PORTAL, resolveLookupState,
+} from "@/lib/appeal";
+
+const ICONS: Record<string, any> = {
+  Receipt, Car, Signpost, ParkingMeter, FileText, TriangleAlert, HeartPulse, MessageSquare,
+};
+
+const STEPS = ["Ticket", "Situation", "Defense", "Appeal"];
+
+// Print a plain-text letter as a clean, printable page the browser can save as PDF.
+// Works inside the sandboxed iframe by writing into a hidden iframe and printing it.
+function printLetter(text: string, title: string) {
+  const existing = document.getElementById("__print_frame__");
+  if (existing) existing.remove();
+  const frame = document.createElement("iframe");
+  frame.id = "__print_frame__";
+  frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;";
+  document.body.appendChild(frame);
+  const doc = frame.contentWindow?.document;
+  if (!doc) return;
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  doc.open();
+  doc.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
+    <style>
+      @page { margin: 1in; }
+      html,body { margin:0; padding:0; background:#fff; }
+      body { font-family: 'Times New Roman', Georgia, serif; color:#111; }
+      pre { white-space: pre-wrap; word-wrap: break-word; font-family: inherit;
+            font-size: 12pt; line-height: 1.5; margin:0; }
+    </style></head><body><pre>${esc(text)}</pre></body></html>`);
+  doc.close();
+  const win = frame.contentWindow;
+  if (!win) return;
+  // Give the iframe a tick to lay out before printing.
+  setTimeout(() => { win.focus(); win.print(); }, 150);
+}
+
+function useDark() {
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
+  useEffect(() => { document.documentElement.classList.toggle("dark", dark); }, [dark]);
+  return [dark, () => setDark((d) => !d)] as const;
+}
+
+export default function Home() {
+  const [dark, toggleDark] = useDark();
+  const [step, setStep] = useState(0);
+  const [sit, setSit] = useState<string | null>(null);
+  const [f, setF] = useState<TicketForm>(emptyForm);
+  const [copied, setCopied] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  // FOIL feature state
+  const [foilMode, setFoilMode] = useState(false);
+  const [foil, setFoil] = useState<FoilForm>(emptyFoil);
+  const [foilCopied, setFoilCopied] = useState(false);
+  const [foilSubmitting, setFoilSubmitting] = useState(false);
+  const [foilSubmitMsg, setFoilSubmitMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  // FOIL denial-appeal state
+  const [appealMode, setAppealMode] = useState(false);
+  const [fap, setFap] = useState<FoilAppealForm>(emptyFoilAppeal);
+  const [fapCopied, setFapCopied] = useState(false);
+
+  // Check my open tickets (official portal hand-off)
+  const [lookupMode, setLookupMode] = useState(false);
+  const [lkPlate, setLkPlate] = useState("");
+  const [lkState, setLkState] = useState("NY");
+  const [lkCopied, setLkCopied] = useState(false);
+
+  const setField = (k: keyof TicketForm) => (e: any) =>
+    setF((p) => ({ ...p, [k]: e.target.value }));
+
+  const { days, deadline, daysLeft } = useMemo(() => deadlineInfo(f), [f.vdate, f.isCamera]);
+  const def = sit ? DEFENSES[sit] : null;
+  const letter = useMemo(() => (sit ? buildLetter(f, sit) : ""), [f, sit]);
+  const canStep1 = f.ticket && f.vdate;
+  const foilLetter = useMemo(() => buildFoilLetter(f, sit || "", foil), [f, sit, foil]);
+
+  const openFoil = () => {
+    // Pre-check the records that match the resident's situation.
+    setFoil((p) => (p.records.length ? p : { ...p, records: suggestedFoilRecords(sit) }));
+    setFoilSubmitMsg(null);
+    setFoilMode(true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  const closeFoil = () => { setFoilMode(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const toggleFoilRecord = (id: string) =>
+    setFoil((p) => ({ ...p, records: p.records.includes(id) ? p.records.filter((r) => r !== id) : [...p.records, id] }));
+
+  // FOIL denial-appeal helpers
+  const foilAppealLetter = useMemo(() => buildFoilAppealLetter(f, fap), [f, fap]);
+  const openAppeal = () => { setAppealMode(true); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const closeAppeal = () => { setAppealMode(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
+
+  // Check my open tickets — guided hand-off to the official City portal.
+  const openLookup = () => {
+    // Carry over anything the resident already typed into the wizard.
+    if (f.plate && !lkPlate) setLkPlate(f.plate);
+    const resolved = resolveLookupState(f.state);
+    if (resolved) setLkState(resolved.abbr);
+    setLookupMode(true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  const closeLookup = () => { setLookupMode(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const lkResolvedState = resolveLookupState(lkState);
+  const lkCopyPlate = () => {
+    if (navigator.clipboard && lkPlate) navigator.clipboard.writeText(lkPlate.trim().toUpperCase());
+    setLkCopied(true);
+    setTimeout(() => setLkCopied(false), 1800);
+  };
+  // Copy the plate for convenience. The actual navigation is handled by a real
+  // <a target="_blank"> element, NOT window.open() — programmatic window.open is
+  // blocked by Cross-Origin-Opener-Policy when the app runs inside a cross-origin
+  // iframe (observed in Safari: “Navigation was blocked by Cross-Origin-Opener-Policy”).
+  const lkOnOpenPortal = () => {
+    if (navigator.clipboard && lkPlate) navigator.clipboard.writeText(lkPlate.trim().toUpperCase());
+    setLkCopied(true);
+    setTimeout(() => setLkCopied(false), 1800);
+  };
+  const fapCopy = () => {
+    if (navigator.clipboard) navigator.clipboard.writeText(foilAppealLetter);
+    setFapCopied(true);
+    setTimeout(() => setFapCopied(false), 1800);
+  };
+  const fapMailto = () => {
+    const subject = encodeURIComponent(`FOIL Appeal under POL § 89(4)(a) — Ticket No. ${f.ticket || ""}`);
+    const body = encodeURIComponent(foilAppealLetter);
+    window.open(`mailto:${FOIL_APPEAL_CONTACT.email}?subject=${subject}&body=${body}`, "_blank");
+  };
+
+  const foilCopy = () => {
+    if (navigator.clipboard) navigator.clipboard.writeText(foilLetter);
+    setFoilCopied(true);
+    setTimeout(() => setFoilCopied(false), 1800);
+  };
+  const foilMailto = () => {
+    const subject = encodeURIComponent(`FOIL Request — records concerning Ticket No. ${f.ticket || ""}`);
+    const body = encodeURIComponent(foilLetter);
+    window.open(`mailto:${FOIL_CONTACT.email}?subject=${subject}&body=${body}`, "_blank");
+  };
+  async function foilSubmit() {
+    setFoilSubmitting(true);
+    setFoilSubmitMsg(null);
+    try {
+      const res = await apiRequest("POST", "/api/submit-foil", {
+        ticket: f.ticket,
+        name: f.name,
+        email: f.email,
+        recipient: FOIL_CONTACT.email,
+        format: foil.format,
+        letter: foilLetter,
+      });
+      const json = await res.json();
+      if (json.ok) {
+        setFoilSubmitMsg({
+          kind: "ok",
+          text: json.delivered
+            ? `Your FOIL request was submitted to the City Clerk (${FOIL_CONTACT.email}). Keep a copy — the City must respond within five business days.`
+            : `Your request was logged. To finish submitting, use "Open email" below (it pre-fills everything to ${FOIL_CONTACT.email}) or the official FOIL portal. Keep a copy for your records.`,
+        });
+        if (!json.delivered) foilMailto();
+      } else {
+        setFoilSubmitMsg({ kind: "err", text: "Couldn't submit automatically. Use \"Open email\" below to send it yourself." });
+      }
+    } catch {
+      setFoilSubmitMsg({ kind: "err", text: "Couldn't submit automatically. Use \"Open email\" below to send it yourself." });
+    } finally {
+      setFoilSubmitting(false);
+    }
+  }
+
+  async function handleFile(file: File) {
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) {
+      setUploadMsg({ kind: "err", text: "Image is too large (max 10MB). Try a smaller photo." });
+      return;
+    }
+    setUploading(true);
+    setUploadMsg(null);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = reader.result as string;
+      setPreview(dataUrl);
+      try {
+        const res = await apiRequest("POST", "/api/extract-ticket", { image: dataUrl });
+        const json = await res.json();
+        const x = json.fields || {};
+        setF((p) => ({
+          ...p,
+          ticket: x.ticket || p.ticket,
+          vdate: x.vdate || p.vdate,
+          vtime: x.vtime || p.vtime,
+          location: x.location || p.location,
+          plate: x.plate || p.plate,
+          state: x.state || p.state,
+          make: x.make || p.make,
+          model: x.model || p.model,
+          violation: x.violation || p.violation,
+          amount: x.amount || p.amount,
+          isCamera: typeof x.is_camera === "boolean" ? x.is_camera : p.isCamera,
+        }));
+        const got = [x.ticket && "ticket number", x.vdate && "date", x.plate && "plate"].filter(Boolean);
+        setUploadMsg({
+          kind: "ok",
+          text: got.length
+            ? `Read your ${got.join(", ")}. Check the fields below and fix anything that's off.`
+            : "Photo received, but some fields were hard to read. Please fill them in below.",
+        });
+      } catch {
+        setUploadMsg({ kind: "err", text: "Couldn't read the image automatically. You can still type the details in below." });
+      } finally {
+        setUploading(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  }
+
+  const copy = () => {
+    if (navigator.clipboard) navigator.clipboard.writeText(letter);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1800);
+  };
+  const mailto = () => {
+    const subject = encodeURIComponent(`Parking Ticket Appeal — Ticket No. ${f.ticket || ""}`);
+    const body = encodeURIComponent(letter);
+    window.open(`mailto:parkingticketappeal@albanyny.gov?subject=${subject}&body=${body}`, "_blank");
+  };
+
+  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkPlate(""); setLkState("NY"); };
+
+  const inputCls = "w-full rounded-md border border-input bg-secondary/40 px-3 py-2.5 text-sm focus:border-primary focus:bg-background focus:outline-none focus:ring-2 focus:ring-primary/25 transition";
+  const labelCls = "block text-sm font-semibold mb-1.5";
+
+  return (
+    <div className="min-h-dvh bg-background text-foreground">
+      {/* Header */}
+      <header className="sticky top-0 z-30 border-b border-border bg-background/85 backdrop-blur">
+        <div className="mx-auto flex h-16 max-w-4xl items-center justify-between px-5">
+          <div className="flex items-center gap-3">
+            <span className="text-primary"><Shield size={24} /></span>
+            <div>
+              <div className="font-semibold leading-none tracking-tight" style={{ fontFamily: "var(--font-sans)" }}>Albany Ticket Appeal</div>
+              <div className="text-xs text-muted-foreground mt-0.5">Contest your parking ticket — free</div>
+            </div>
+          </div>
+          <button onClick={toggleDark} aria-label="Toggle theme"
+            className="grid h-10 w-10 place-items-center rounded-md border border-border text-muted-foreground hover-elevate">
+            {dark ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+        </div>
+      </header>
+
+      {/* Hero (step 0 only) */}
+      {step === 0 && (
+        <section className="mx-auto max-w-4xl px-5 pt-12 pb-6">
+          <span className="inline-flex items-center gap-2 rounded-full bg-accent/15 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-accent">
+            <Shield size={13} /> For City of Albany residents
+          </span>
+          <h1 className="mt-4 mb-3 max-w-[19ch] text-3xl font-bold leading-tight tracking-tight sm:text-4xl">
+            Beat your Albany parking ticket — fast and effectively.
+          </h1>
+          <p className="max-w-[56ch] text-muted-foreground">
+            Snap a photo of your ticket or type it in. We match your situation to the strongest defense
+            Albany's Parking Violations Bureau actually accepts, then generate a ready-to-send appeal — no lawyer required.
+          </p>
+          <div className="mt-6 flex flex-wrap gap-4">
+            {["Reads your ticket from a photo", "Tracks your appeal deadline", "Free & private"].map((t) => (
+              <div key={t} className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                <Check size={16} className="text-accent" /> {t}
+              </div>
+            ))}
+          </div>
+          <div className="mt-7 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+            <span className="text-muted-foreground">Not sure what you owe?</span>
+            <button onClick={openLookup} data-testid="button-open-lookup-hero"
+              className="inline-flex items-center gap-1.5 font-semibold text-primary underline-offset-4 hover:underline">
+              <Search size={15} /> Check your open parking tickets
+            </button>
+          </div>
+        </section>
+      )}
+
+      <main className="mx-auto max-w-4xl px-5 pb-20">
+        <div className="rounded-2xl border border-card-border bg-card p-6 shadow-sm sm:p-8">
+          {/* ============ CHECK MY OPEN TICKETS MODE ============ */}
+          {lookupMode ? (
+            <div data-testid="panel-lookup">
+              <button onClick={closeLookup} data-testid="button-lookup-back"
+                className="mb-5 inline-flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground">
+                <ArrowLeft size={16} /> Back
+              </button>
+              <div className="mb-1 flex items-center gap-2">
+                <span className="grid h-9 w-9 place-items-center rounded-md bg-primary/10 text-primary"><Search size={20} /></span>
+                <h2 className="text-xl font-semibold">Check my open parking tickets</h2>
+              </div>
+              <p className="mb-6 text-sm text-muted-foreground">
+                The City of Albany lets you see every open parking citation tied to your vehicle on its official
+                <a className="text-primary underline decoration-dotted" href={LOOKUP_PORTAL.parkingUrl} target="_blank" rel="noopener"> Ticketing &amp; Enforcement portal</a>.
+                Enter your plate and state below — we'll copy your plate and take you straight there.
+              </p>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className={labelCls} htmlFor="lk-plate">License plate</label>
+                  <input id="lk-plate" className={inputCls} value={lkPlate}
+                    onChange={(e) => setLkPlate(e.target.value)}
+                    placeholder="e.g. ABC1234" autoCapitalize="characters" data-testid="input-lookup-plate" />
+                </div>
+                <div>
+                  <label className={labelCls} htmlFor="lk-state">State / province</label>
+                  <select id="lk-state" className={inputCls} value={lkState}
+                    onChange={(e) => setLkState(e.target.value)} data-testid="select-lookup-state">
+                    {LOOKUP_STATES.map((s) => (
+                      <option key={s.id} value={s.abbr}>{s.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* What you'll do on the portal */}
+              <div className="mt-6 rounded-xl border border-border bg-secondary/30 p-4">
+                <div className="mb-2 text-sm font-semibold">What happens next</div>
+                <ol className="space-y-1.5 text-sm text-muted-foreground">
+                  <li>1. We open the City's official portal in a new tab and copy your plate.</li>
+                  <li>2. In the box labeled <b>“To see all open citations for your vehicle…”</b>, paste your plate ({lkPlate ? <b className="text-foreground">{lkPlate.trim().toUpperCase()}</b> : "your plate"}) and pick <b className="text-foreground">{lkResolvedState ? lkResolvedState.name : "your state"}</b>.</li>
+                  <li>3. Complete the quick “Human Verification” check, then press <b>Search</b>.</li>
+                  <li>4. Every open citation, its status, and the amount due will appear.</li>
+                </ol>
+              </div>
+
+              <div className="mt-5 flex flex-wrap gap-3">
+                <a href={LOOKUP_PORTAL.parkingUrl} target="_blank" rel="noopener noreferrer"
+                  onClick={lkOnOpenPortal} data-testid="button-lookup-open"
+                  className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">
+                  <ExternalLink size={16} /> Open the City portal
+                </a>
+                <button onClick={lkCopyPlate} disabled={!lkPlate} data-testid="button-lookup-copy"
+                  className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate disabled:opacity-40 disabled:cursor-not-allowed">
+                  {lkCopied ? <><Check size={16} className="text-accent" /> Plate copied</> : <><Copy size={16} /> Copy plate</>}
+                </button>
+              </div>
+
+              {/* Why we hand off rather than show results inline */}
+              <div className="mt-6 flex items-start gap-3 rounded-lg bg-primary/5 px-4 py-3 text-xs text-muted-foreground" data-testid="note-lookup-why">
+                <Info size={15} className="mt-0.5 shrink-0 text-primary" />
+                <div>
+                  We send you to the City's own system so you see live, official records straight from the source —
+                  no middle-man copy of your data. The portal uses a human-verification step, so the lookup happens there, not here.
+                </div>
+              </div>
+
+              {/* Camera tickets are handled elsewhere */}
+              <div className="mt-4 flex items-start gap-3 rounded-lg border border-border bg-secondary/30 px-4 py-3 text-xs text-muted-foreground">
+                <Camera size={15} className="mt-0.5 shrink-0 text-muted-foreground" />
+                <div>
+                  Looking for a <b>red-light or school-zone speed camera</b> ticket? Those are handled separately through the
+                  Citation Processing Center, not the parking portal — check them on the
+                  <a className="text-primary underline decoration-dotted" href={LOOKUP_PORTAL.cameraUrl} target="_blank" rel="noopener"> City's Pay Bills &amp; Tickets page</a>.
+                </div>
+              </div>
+            </div>
+          ) : appealMode ? (
+            <div data-testid="panel-foil-appeal">
+              <button onClick={closeAppeal} data-testid="button-appeal-back"
+                className="mb-5 inline-flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground">
+                <ArrowLeft size={16} /> Back to my FOIL request
+              </button>
+              <div className="mb-1 flex items-center gap-2">
+                <span className="grid h-9 w-9 place-items-center rounded-md bg-primary/10 text-primary"><Gavel size={20} /></span>
+                <h2 className="text-xl font-semibold">Appeal a FOIL denial</h2>
+              </div>
+              <p className="mb-6 text-sm text-muted-foreground">
+                If the City denied your records request, ignored it past five business days, redacted too much, or
+                overcharged you, the law gives you 30 days to appeal in writing. We draft the appeal letter, cite the
+                statute, and copy the state oversight body that must review it.
+              </p>
+
+              {/* What went wrong */}
+              <h3 className="mb-2 text-sm font-semibold">What happened with your request?</h3>
+              <div className="space-y-2.5">
+                {FOIL_APPEAL_REASONS.map((r) => {
+                  const on = fap.reason === r.id;
+                  return (
+                    <button key={r.id} onClick={() => setFap((p) => ({ ...p, reason: r.id as FoilAppealReason }))} data-testid={`appeal-reason-${r.id}`}
+                      className={`flex w-full items-start gap-3 rounded-xl border p-3.5 text-left transition hover-elevate ${on ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border bg-secondary/30"}`}>
+                      <span className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full border ${on ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background"}`}>
+                        {on && <Check size={13} />}
+                      </span>
+                      <div className="flex-1">
+                        <div className="text-sm font-semibold">{r.label}</div>
+                        <div className="text-xs leading-snug text-muted-foreground">{r.detail}</div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Dates */}
+              <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className={labelCls}>When did you send your FOIL request?</label>
+                  <input type="date" className={inputCls} value={fap.requestDate}
+                    onChange={(e) => setFap((p) => ({ ...p, requestDate: e.target.value }))} data-testid="input-appeal-reqdate" />
+                </div>
+                <div>
+                  <label className={labelCls}>Date of the denial <span className="font-normal text-muted-foreground/70">(if any)</span></label>
+                  <input type="date" className={inputCls} value={fap.denialDate}
+                    onChange={(e) => setFap((p) => ({ ...p, denialDate: e.target.value }))} data-testid="input-appeal-dendate" />
+                </div>
+              </div>
+
+              {/* Records at issue */}
+              <div className="mt-5">
+                <label className={labelCls}>Which records are you fighting for? <span className="font-normal text-muted-foreground/70">(in your own words)</span></label>
+                <textarea className={`${inputCls} min-h-16 resize-y`} value={fap.records}
+                  onChange={(e) => setFap((p) => ({ ...p, records: e.target.value }))} data-testid="input-appeal-records"
+                  placeholder="e.g. the ticket photos and the meter maintenance log" />
+              </div>
+
+              {/* What the City said */}
+              <div className="mt-5">
+                <label className={labelCls}>What reason did the City give? <span className="font-normal text-muted-foreground/70">(optional — paste or paraphrase)</span></label>
+                <textarea className={`${inputCls} min-h-16 resize-y`} value={fap.agencyReason}
+                  onChange={(e) => setFap((p) => ({ ...p, agencyReason: e.target.value }))} data-testid="input-appeal-agencyreason"
+                  placeholder="e.g. 'These records are exempt' or 'We have no responsive records.'" />
+              </div>
+
+              {/* Live preview */}
+              <h3 className="mt-7 mb-2 text-sm font-semibold">Your appeal letter</h3>
+              <div className="max-h-[420px] overflow-auto rounded-xl border border-border bg-secondary/30 p-6 font-mono text-[13px] leading-relaxed whitespace-pre-wrap" data-testid="text-appeal-letter">{foilAppealLetter}</div>
+
+              {/* Legal basis */}
+              <div className="mt-5 rounded-md border border-border bg-background/60 px-4 py-3 text-xs" data-testid="section-appeal-legal-basis">
+                <b className="flex items-center gap-1.5 text-foreground"><Scale size={14} className="shrink-0" /> The law behind your appeal</b>
+                <ul className="mt-2 space-y-2">
+                  {FOIL_APPEAL_AUTHORITY.map((c, i) => (
+                    <li key={i} data-testid={`appeal-citation-${i}`}>
+                      <a href={c.url} target="_blank" rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-2 hover:underline">
+                        {c.authority}<ExternalLink size={11} className="shrink-0" />
+                      </a>
+                      <span className="block text-muted-foreground">{c.summary}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              {/* Submit actions */}
+              <div className="mt-6 rounded-xl border border-border bg-secondary/30 p-5">
+                <h4 className="mb-1 flex items-center gap-2 text-sm font-semibold"><Send size={18} /> Send your appeal</h4>
+                <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
+                  Send to the City Clerk's office, attention <b>{FOIL_APPEAL_CONTACT.appealsOfficer}</b> ({FOIL_APPEAL_CONTACT.email}). The City must respond within ten business days.
+                </p>
+                <div className="flex flex-wrap gap-3">
+                  <button onClick={fapMailto} data-testid="button-appeal-email"
+                    className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate"><Mail size={16} /> Open email to send</button>
+                  <button onClick={() => printLetter(foilAppealLetter, `FOIL Appeal — Ticket ${f.ticket || ""}`)} data-testid="button-appeal-print"
+                    className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Printer size={16} /> Save as PDF / print</button>
+                  <button onClick={fapCopy} data-testid="button-appeal-copy"
+                    className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Copy size={16} /> {fapCopied ? "Copied!" : "Copy letter"}</button>
+                </div>
+                <p className="mt-3 text-xs text-muted-foreground">
+                  {FOIL_APPEAL_CONTACT.coog.note} Mail copies to: {FOIL_APPEAL_CONTACT.agencyLines.join(", ")}.
+                </p>
+              </div>
+            </div>
+          ) : foilMode ? (
+            <div data-testid="panel-foil">
+              <button onClick={closeFoil} data-testid="button-foil-back"
+                className="mb-5 inline-flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground">
+                <ArrowLeft size={16} /> Back to my appeal
+              </button>
+              <div className="mb-1 flex items-center gap-2">
+                <span className="grid h-9 w-9 place-items-center rounded-md bg-primary/10 text-primary"><FileSearch size={20} /></span>
+                <h2 className="text-xl font-semibold">Request the City's records (FOIL)</h2>
+              </div>
+              <p className="mb-6 text-sm text-muted-foreground">
+                New York's Freedom of Information Law lets you demand the City's own evidence — the photos, logs, and
+                maintenance records behind your ticket. Pick what you want in plain English; we turn it into a
+                legally-proper FOIL letter and submit it for you.
+              </p>
+
+              {/* Intake: record checkboxes */}
+              <h3 className="mb-2 text-sm font-semibold">What records do you want?</h3>
+              <p className="mb-3 text-xs text-muted-foreground">We pre-selected the ones that fit your situation. Add or remove any.</p>
+              <div className="space-y-2.5">
+                {FOIL_RECORDS.map((r) => {
+                  const on = foil.records.includes(r.id);
+                  return (
+                    <button key={r.id} onClick={() => toggleFoilRecord(r.id)} data-testid={`foil-record-${r.id}`}
+                      className={`flex w-full items-start gap-3 rounded-xl border p-3.5 text-left transition hover-elevate ${on ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border bg-secondary/30"}`}>
+                      <span className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded border ${on ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background"}`}>
+                        {on && <Check size={14} />}
+                      </span>
+                      <div className="flex-1">
+                        <div className="text-sm font-semibold">{r.label}</div>
+                        <div className="text-xs leading-snug text-muted-foreground">{r.detail}</div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Custom free-text */}
+              <div className="mt-5">
+                <label className={labelCls}>Anything else, in your own words <span className="font-normal text-muted-foreground/70">(optional)</span></label>
+                <textarea className={`${inputCls} min-h-20 resize-y`} value={foil.custom}
+                  onChange={(e) => setFoil((p) => ({ ...p, custom: e.target.value }))} data-testid="input-foil-custom"
+                  placeholder="e.g. Any complaints filed about this meter, or the work order for the faded sign on my block." />
+              </div>
+
+              {/* Delivery format */}
+              <div className="mt-5">
+                <label className={labelCls}>How would you like to receive the records?</label>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {([
+                    { id: "email", label: "By email", sub: "Fastest, usually free" },
+                    { id: "mail", label: "By mail", sub: "$0.25 per page" },
+                    { id: "inspect", label: "Inspect in person", sub: "Free, at City Hall" },
+                  ] as const).map((o) => {
+                    const on = foil.format === o.id;
+                    return (
+                      <button key={o.id} onClick={() => setFoil((p) => ({ ...p, format: o.id }))} data-testid={`foil-format-${o.id}`}
+                        className={`rounded-lg border p-3 text-left transition hover-elevate ${on ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border bg-secondary/30"}`}>
+                        <div className="text-sm font-semibold">{o.label}</div>
+                        <div className="text-xs text-muted-foreground">{o.sub}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Your contact (reuses ticket form) */}
+              <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                <div><label className={labelCls}>Your name</label><input className={inputCls} value={f.name} onChange={setField("name")} placeholder="Jane Doe" data-testid="input-foil-name" /></div>
+                <div><label className={labelCls}>Your email</label><input className={inputCls} value={f.email} onChange={setField("email")} placeholder="you@email.com" data-testid="input-foil-email" /></div>
+              </div>
+
+              {/* Live letter preview */}
+              <h3 className="mt-7 mb-2 text-sm font-semibold">Your FOIL letter</h3>
+              <p className="mb-3 text-xs text-muted-foreground">This updates as you choose records. You can edit anything after copying or opening it in email.</p>
+              <div className="max-h-[420px] overflow-auto rounded-xl border border-border bg-secondary/30 p-6 font-mono text-[13px] leading-relaxed whitespace-pre-wrap" data-testid="text-foil-letter">{foilLetter}</div>
+
+              {/* Legal basis */}
+              <div className="mt-5 rounded-md border border-border bg-background/60 px-4 py-3 text-xs" data-testid="section-foil-legal-basis">
+                <b className="flex items-center gap-1.5 text-foreground"><Scale size={14} className="shrink-0" /> Your legal right to these records</b>
+                <p className="mt-1 text-muted-foreground">These citations are written into your letter. The City must follow them.</p>
+                <ul className="mt-2 space-y-2">
+                  {FOIL_AUTHORITY.map((c, i) => (
+                    <li key={i} data-testid={`foil-citation-${i}`}>
+                      <a href={c.url} target="_blank" rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-2 hover:underline">
+                        {c.authority}<ExternalLink size={11} className="shrink-0" />
+                      </a>
+                      <span className="block text-muted-foreground">{c.summary}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              {/* Submit */}
+              {foilSubmitMsg && (
+                <div className={`mt-5 flex items-start gap-3 rounded-lg px-4 py-3 text-sm ${foilSubmitMsg.kind === "ok" ? "bg-accent/12 text-accent" : "bg-destructive/12 text-destructive"}`} data-testid="text-foil-submit-msg">
+                  {foilSubmitMsg.kind === "ok" ? <CheckCircle2 size={18} className="mt-0.5 shrink-0" /> : <X size={18} className="mt-0.5 shrink-0" />}
+                  <div>{foilSubmitMsg.text}</div>
+                </div>
+              )}
+
+              <div className="mt-6 rounded-xl border border-border bg-secondary/30 p-5">
+                <h4 className="mb-1 flex items-center gap-2 text-sm font-semibold"><Send size={18} /> Submit your FOIL request</h4>
+                <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
+                  Sends to the City Clerk — Records Access Officer at <b>{FOIL_CONTACT.email}</b>. The City must respond within five business days.
+                </p>
+                <div className="flex flex-wrap gap-3">
+                  <button onClick={foilSubmit} disabled={foilSubmitting} data-testid="button-foil-submit"
+                    className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate disabled:opacity-50">
+                    {foilSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />} Submit request
+                  </button>
+                  <button onClick={foilMailto} data-testid="button-foil-email"
+                    className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Mail size={16} /> Open email</button>
+                  <button onClick={() => printLetter(foilLetter, `FOIL Request — Ticket ${f.ticket || ""}`)} data-testid="button-foil-print"
+                    className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Printer size={16} /> Save as PDF / print</button>
+                  <button onClick={foilCopy} data-testid="button-foil-copy"
+                    className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Copy size={16} /> {foilCopied ? "Copied!" : "Copy letter"}</button>
+                  <a href={FOIL_CONTACT.portalInfo} target="_blank" rel="noopener noreferrer" data-testid="link-foil-portal"
+                    className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><ExternalLink size={16} /> Official FOIL portal</a>
+                </div>
+                <p className="mt-3 text-xs text-muted-foreground">
+                  Prefer the City's online portal? Use “Official FOIL portal” — you can paste the copied letter there. Mail/in-person: {FOIL_CONTACT.addressLines.join(", ")}. Phone {FOIL_CONTACT.phone}.
+                </p>
+              </div>
+
+              {/* Denial-appeal entry */}
+              <button onClick={openAppeal} data-testid="button-open-appeal"
+                className="mt-4 flex w-full items-center gap-4 rounded-xl border border-border bg-secondary/30 p-4 text-left transition hover-elevate">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-primary/10 text-primary"><Gavel size={20} /></span>
+                <div className="flex-1">
+                  <div className="text-sm font-semibold">Already got a denial — or no response?</div>
+                  <div className="text-xs leading-snug text-muted-foreground">Build a FOIL appeal under Public Officers Law § 89(4)(a). You have 30 days from a denial.</div>
+                </div>
+                <span className="shrink-0 text-muted-foreground"><ArrowLeft size={16} className="rotate-180" /></span>
+              </button>
+            </div>
+          ) : (
+          <>
+          {/* Stepper */}
+          <div className="mb-8 flex gap-2">
+            {STEPS.map((s, i) => (
+              <div key={s} className="flex-1">
+                <div className={`h-1.5 rounded-full transition ${i <= step ? "bg-primary" : "bg-border"}`} />
+                <small className={`mt-2 block text-xs font-semibold uppercase tracking-wide ${i === step ? "text-foreground" : "text-muted-foreground/60"}`}>{s}</small>
+              </div>
+            ))}
+          </div>
+
+          {/* STEP 0 — ticket + upload */}
+          {step === 0 && (
+            <div>
+              <h2 className="mb-1 text-xl font-semibold">Your ticket details</h2>
+              <p className="mb-6 text-sm text-muted-foreground">
+                Upload a photo of the ticket and we'll read it for you — or enter the details by hand. Find them on the
+                ticket or at <a className="text-primary underline decoration-dotted" href="https://albany.rmcpay.com/" target="_blank" rel="noopener">albany.rmcpay.com</a>.
+              </p>
+
+              <button onClick={openLookup} data-testid="button-open-lookup-step0"
+                className="mb-6 inline-flex items-center gap-1.5 text-sm font-semibold text-primary underline-offset-4 hover:underline">
+                <Search size={15} /> Don't know your ticket number? Look up your open tickets
+              </button>
+
+              {/* Upload zone */}
+              <div
+                onClick={() => fileRef.current?.click()}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => { e.preventDefault(); const file = e.dataTransfer.files?.[0]; if (file) handleFile(file); }}
+                className="mb-6 cursor-pointer rounded-xl border-2 border-dashed border-border bg-secondary/30 p-6 text-center transition hover:border-primary hover:bg-secondary/50"
+              >
+                <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden"
+                  onChange={(e) => { const file = e.target.files?.[0]; if (file) handleFile(file); }} />
+                {uploading ? (
+                  <div className="flex items-center justify-center gap-3 text-sm text-muted-foreground">
+                    <Loader2 size={20} className="animate-spin" /> Reading your ticket…
+                  </div>
+                ) : preview ? (
+                  <div className="flex flex-col items-center gap-3">
+                    <img src={preview} alt="Ticket preview" className="max-h-40 rounded-md border border-border object-contain" />
+                    <span className="text-xs text-muted-foreground">Tap to replace photo</span>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center gap-2">
+                    <span className="grid h-12 w-12 place-items-center rounded-full bg-primary/10 text-primary"><Upload size={22} /></span>
+                    <span className="text-sm font-semibold">Upload or photograph your ticket</span>
+                    <span className="text-xs text-muted-foreground">JPG or PNG, up to 10MB · we'll auto-fill the fields</span>
+                  </div>
+                )}
+              </div>
+              {uploadMsg && (
+                <div className={`mb-6 flex items-start gap-3 rounded-lg px-4 py-3 text-sm ${uploadMsg.kind === "ok" ? "bg-accent/12 text-accent" : "bg-destructive/12 text-destructive"}`}>
+                  {uploadMsg.kind === "ok" ? <CheckCircle2 size={18} className="mt-0.5 shrink-0" /> : <X size={18} className="mt-0.5 shrink-0" />}
+                  <div>{uploadMsg.text}</div>
+                </div>
+              )}
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div><label className={labelCls}>Ticket / citation number *</label><input className={inputCls} value={f.ticket} onChange={setField("ticket")} placeholder="e.g. 1234567" data-testid="input-ticket" /></div>
+                <div><label className={labelCls}>Date of violation *</label><input type="date" className={inputCls} value={f.vdate} onChange={setField("vdate")} data-testid="input-vdate" /></div>
+              </div>
+              <div className="mt-4"><label className={labelCls}>Location <span className="font-normal text-muted-foreground/70">(optional)</span></label><input className={inputCls} value={f.location} onChange={setField("location")} placeholder="e.g. 100 State St, near Eagle St" data-testid="input-location" /></div>
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <div><label className={labelCls}>License plate <span className="font-normal text-muted-foreground/70">(optional)</span></label><input className={inputCls} value={f.plate} onChange={setField("plate")} placeholder="ABC-1234" data-testid="input-plate" /></div>
+                <div><label className={labelCls}>State</label><input className={inputCls} value={f.state} onChange={setField("state")} placeholder="NY" data-testid="input-state" /></div>
+              </div>
+
+              <label className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
+                <input type="checkbox" checked={f.isCamera} onChange={(e) => setF((p) => ({ ...p, isCamera: e.target.checked }))} className="h-4 w-4 accent-[hsl(var(--primary))]" data-testid="checkbox-camera" />
+                This is a red-light or school-zone camera ticket (RLC / SZS)
+              </label>
+
+              {deadline && (
+                <div className={`mt-5 flex items-start gap-3 rounded-lg px-4 py-3 text-sm ${daysLeft != null && daysLeft <= 5 ? "bg-[hsl(33_70%_40%/0.12)] text-[hsl(33_70%_36%)] dark:text-[hsl(33_70%_62%)]" : "bg-primary/10 text-primary"}`}>
+                  <Clock size={18} className="mt-0.5 shrink-0" />
+                  <div data-testid="text-deadline">
+                    {daysLeft != null && daysLeft < 0 ? (
+                      <><b>Heads up — the standard appeal window has passed.</b> Albany must receive {f.isCamera ? "red-light/school-zone" : "parking"} appeals within {days} days of issuance (by {fmtDate(deadline.toISOString().slice(0, 10))}). It's still worth contacting the Bureau, but late appeals may not be accepted.</>
+                    ) : (
+                      <><b>You have about {daysLeft} day{daysLeft === 1 ? "" : "s"} left.</b> Albany must receive your {f.isCamera ? "red-light/school-zone" : "parking"} appeal within {days} days — by <b>{fmtDate(deadline.toISOString().slice(0, 10))}</b>. Don't pay it first; paying counts as pleading guilty.</>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-8 flex items-center justify-between">
+                <span />
+                <button disabled={!canStep1} onClick={() => setStep(1)} data-testid="button-continue-1"
+                  className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate disabled:opacity-40 disabled:cursor-not-allowed">
+                  Continue →
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 1 — situation */}
+          {step === 1 && (
+            <div>
+              <h2 className="mb-1 text-xl font-semibold">What best describes your situation?</h2>
+              <p className="mb-6 text-sm text-muted-foreground">Pick the one that fits best. We'll turn it into the right legal argument.</p>
+              <div className="space-y-3">
+                {SITUATIONS.map((s) => {
+                  const Ic = ICONS[s.icon];
+                  const selected = sit === s.id;
+                  return (
+                    <button key={s.id} onClick={() => setSit(s.id)} data-testid={`option-${s.id}`}
+                      className={`flex w-full items-start gap-4 rounded-xl border p-4 text-left transition hover-elevate ${selected ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border bg-secondary/30"}`}>
+                      <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-md border ${selected ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-primary"}`}>
+                        <Ic size={20} />
+                      </span>
+                      <div className="flex-1">
+                        <h4 className="text-sm font-semibold">{s.title}</h4>
+                        <p className="text-xs leading-snug text-muted-foreground">{s.sub}</p>
+                      </div>
+                      {selected && <Check size={18} className="shrink-0 text-primary" />}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="mt-8 flex items-center justify-between">
+                <button onClick={() => setStep(0)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
+                <button disabled={!sit} onClick={() => setStep(2)} data-testid="button-continue-2"
+                  className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate disabled:opacity-40">Continue →</button>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 2 — defense */}
+          {step === 2 && def && (
+            <div>
+              <h2 className="mb-1 text-xl font-semibold">Your strongest defense</h2>
+              <p className="mb-6 text-sm text-muted-foreground">Here's the argument we'll build, and exactly what to attach to make it stick.</p>
+              <div className="rounded-xl border border-border bg-secondary/30 p-5">
+                <h4 className="mb-2 flex flex-wrap items-center gap-3 text-base font-semibold">
+                  {def.title}
+                  <span className={`rounded-full px-3 py-0.5 text-xs font-bold uppercase tracking-wide ${def.strength === "strong" ? "bg-accent/15 text-accent" : def.strength === "moderate" ? "bg-[hsl(33_70%_40%/0.15)] text-[hsl(33_70%_36%)] dark:text-[hsl(33_70%_62%)]" : "bg-destructive/15 text-destructive"}`}>
+                    {strengthLabel(def.strength)}
+                  </span>
+                </h4>
+                <p className="mb-3 text-sm text-muted-foreground">{def.body}</p>
+                <div className="rounded-md bg-background/60 px-4 py-3 text-xs">
+                  <b className="text-foreground">Attach this evidence:</b>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">
+                    {def.evidence.map((e, i) => <li key={i}>{e}</li>)}
+                  </ul>
+                </div>
+
+                {def.legalBasis?.length > 0 && (
+                  <div className="mt-4 rounded-md border border-border bg-background/60 px-4 py-3 text-xs" data-testid="section-legal-basis">
+                    <b className="flex items-center gap-1.5 text-foreground">
+                      <Scale size={14} className="shrink-0" /> Legal basis
+                    </b>
+                    <p className="mt-1 text-muted-foreground">The law and rulings this argument rests on. These citations are added to your appeal letter.</p>
+                    <ul className="mt-2 space-y-2">
+                      {def.legalBasis.map((c, i) => (
+                        <li key={i} data-testid={`citation-${i}`}>
+                          <a href={c.url} target="_blank" rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 font-semibold text-primary underline-offset-2 hover:underline">
+                            {c.authority}<ExternalLink size={11} className="shrink-0" />
+                          </a>
+                          <span className="block text-muted-foreground">{c.summary}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+              <div className="mt-5 flex items-start gap-3 rounded-lg bg-primary/10 px-4 py-3 text-sm text-primary">
+                <Info size={18} className="mt-0.5 shrink-0" /><div>{def.note}</div>
+              </div>
+              <div className="mt-5">
+                <label className={labelCls}>Add your own details <span className="font-normal text-muted-foreground/70">(optional but recommended)</span></label>
+                <textarea className={`${inputCls} min-h-24 resize-y`} value={f.facts} onChange={setField("facts")} data-testid="input-facts"
+                  placeholder="In a sentence or two, explain what happened in your own words. This gets added to your appeal." />
+                <p className="mt-1 text-xs text-muted-foreground">Keep it factual. Avoid admitting you violated the rule.</p>
+              </div>
+              <div className="mt-8 flex items-center justify-between">
+                <button onClick={() => setStep(1)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
+                <button onClick={() => setStep(3)} data-testid="button-generate"
+                  className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">Generate my appeal →</button>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 3 — appeal */}
+          {step === 3 && (
+            <div>
+              <h2 className="mb-1 text-xl font-semibold">Your ready-to-send appeal</h2>
+              <p className="mb-6 text-sm text-muted-foreground">Add your name and contact info, then send it. Email is the fastest channel.</p>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div><label className={labelCls}>Full name *</label><input className={inputCls} value={f.name} onChange={setField("name")} placeholder="Jane Doe" data-testid="input-name" /></div>
+                <div><label className={labelCls}>Email *</label><input className={inputCls} value={f.email} onChange={setField("email")} placeholder="you@email.com" data-testid="input-email" /></div>
+              </div>
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <div><label className={labelCls}>Mailing address</label><input className={inputCls} value={f.address} onChange={setField("address")} placeholder="123 Main St, Albany, NY 12207" data-testid="input-address" /></div>
+                <div><label className={labelCls}>Phone</label><input className={inputCls} value={f.phone} onChange={setField("phone")} placeholder="(518) 555-0100" data-testid="input-phone" /></div>
+              </div>
+
+              {f.isCamera && (
+                <div className="mt-5 flex items-start gap-3 rounded-lg bg-[hsl(33_70%_40%/0.12)] px-4 py-3 text-sm text-[hsl(33_70%_36%)] dark:text-[hsl(33_70%_62%)]">
+                  <TriangleAlert size={18} className="mt-0.5 shrink-0" />
+                  <div><b>This is a red-light or school-zone camera ticket.</b> Review the video first at <a className="underline" href="https://www.viewcitation.com" target="_blank" rel="noopener">viewcitation.com</a>, then appeal online there or by phone at 1-855-427-0455. The letter below works as your written statement.</div>
+                </div>
+              )}
+
+              <div className="mt-6 max-h-[440px] overflow-auto rounded-xl border border-border bg-secondary/30 p-6 font-mono text-[13px] leading-relaxed whitespace-pre-wrap" data-testid="text-letter">{letter}</div>
+
+              <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                <div className="rounded-xl border border-border bg-secondary/30 p-5">
+                  <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold"><Mail size={18} /> Email it (fastest)</h4>
+                  <p className="mb-3 text-xs leading-relaxed text-muted-foreground">Albany recommends email as the easiest, fastest way to appeal a parking ticket.</p>
+                  <div className="mb-3 text-xs font-semibold">parkingticketappeal@albanyny.gov</div>
+                  <div className="flex flex-wrap gap-3">
+                    <button onClick={mailto} data-testid="button-email" className="inline-flex items-center gap-2 rounded-md bg-accent px-5 py-2.5 text-sm font-semibold text-accent-foreground hover-elevate"><Mail size={16} /> Open email</button>
+                    <button onClick={() => printLetter(letter, `Parking Ticket Appeal — Ticket ${f.ticket || ""}`)} data-testid="button-print" className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Printer size={16} /> Save as PDF / print</button>
+                    <button onClick={copy} data-testid="button-copy" className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Copy size={16} /> {copied ? "Copied!" : "Copy text"}</button>
+                  </div>
+                  <p className="mt-3 text-xs text-muted-foreground">Remember to attach your evidence files before sending.</p>
+                </div>
+                <div className="rounded-xl border border-border bg-secondary/30 p-5">
+                  <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold"><MapPin size={18} /> Or mail / visit in person</h4>
+                  <p className="mb-2 text-xs text-muted-foreground">Parking Violations Bureau, City Hall</p>
+                  <div className="mb-3 text-xs font-semibold leading-relaxed">24 Eagle St, Room 203<br />Albany, NY 12207</div>
+                  <p className="text-xs text-muted-foreground">Open 8:30–4:45 (closed 12:30–1:30). Questions: 518-434-5006.</p>
+                </div>
+              </div>
+
+              <div className="mt-6 flex items-start gap-3 rounded-lg bg-accent/12 px-4 py-3 text-sm text-accent">
+                <Check size={18} className="mt-0.5 shrink-0" /><div><b>Before you send:</b> double-check the deadline, attach every piece of evidence from the previous step, and keep a copy of what you send.</div>
+              </div>
+
+              {/* FOIL entry card */}
+              <button onClick={openFoil} data-testid="button-open-foil"
+                className="mt-6 flex w-full items-center gap-4 rounded-xl border border-primary/40 bg-primary/5 p-5 text-left transition hover-elevate">
+                <span className="grid h-11 w-11 shrink-0 place-items-center rounded-md bg-primary/10 text-primary"><FolderOpen size={22} /></span>
+                <div className="flex-1">
+                  <div className="text-sm font-semibold">Make the City hand over its evidence (FOIL request)</div>
+                  <div className="text-xs leading-snug text-muted-foreground">Demand the photos, meter logs, sign records, and camera certificates behind your ticket. We draft the legal letter and submit it for you.</div>
+                </div>
+                <span className="shrink-0 text-primary"><FileSearch size={18} /></span>
+              </button>
+
+              <div className="mt-8 flex items-center justify-between">
+                <button onClick={() => setStep(2)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
+                <button onClick={reset} data-testid="button-reset" className="rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">Start another ticket</button>
+              </div>
+            </div>
+          )}
+          </>
+          )}
+        </div>
+
+        <p className="mt-6 border-t border-dashed border-border pt-4 text-xs leading-relaxed text-muted-foreground/80">
+          <b>Not legal advice.</b> This free tool helps Albany residents prepare a parking-ticket appeal using the City's published Parking Violations Bureau rules.
+          It does not create an attorney-client relationship and does not guarantee a result. Deadlines are calculated from the violation date you enter — always confirm the date on your ticket.
+          Public-safety violations (fire hydrant, handicapped, crosswalk, obstruction, red-light and school-zone cameras) face a higher standard and are not voided without solid proof.
+          For anything serious or for a hearing, consider consulting a licensed New York attorney.
+        </p>
+      </main>
+
+      <footer className="border-t border-border py-8">
+        <div className="mx-auto max-w-4xl space-y-3 px-5">
+          <div>
+            <p className="flex items-center gap-1.5 text-xs font-semibold text-foreground"><Scale size={13} /> Who runs the Bureau (statutory authority)</p>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground/80">
+              {BUREAU_AUTHORITY.map((c, i) => (
+                <span key={i}>
+                  <a className="underline" href={c.url} target="_blank" rel="noopener">{c.authority}</a> — {c.summary}{i < BUREAU_AUTHORITY.length - 1 ? " " : ""}
+                </span>
+              ))}
+            </p>
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground/70">
+            Sources: City of Albany Parking Violations Bureau official guidance (deadlines, appeal channels, accepted defenses) at <a className="underline" href="https://www.albanyny.gov/403/Parking-Violations-Bureau" target="_blank" rel="noopener">albanyny.gov</a>;
+            parking evidence portal <a className="underline" href="https://albany.rmcpay.com/" target="_blank" rel="noopener">albany.rmcpay.com</a>;
+            camera-ticket portal <a className="underline" href="https://www.viewcitation.com" target="_blank" rel="noopener">viewcitation.com</a>. Statutory and case citations link to NY Senate Open Legislation, NY courts, and Justia. Built for Albany residents — not affiliated with the City of Albany.
+          </p>
+          <p className="text-xs leading-relaxed text-muted-foreground/60">
+            Note on camera tickets: Albany's school-zone speed cameras are governed by NY VTL §1180-f. NY VTL §1111-a red-light cameras apply only to New York City; Albany's authority for any red-light camera program is not established by a statute we could verify, so confirm the citation on your specific camera notice before relying on it.
+          </p>
+        </div>
+      </footer>
+    </div>
+  );
+}

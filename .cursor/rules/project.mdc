@@ -1,0 +1,12 @@
+---
+description: Core rules for the Albany Parking Ticket Appeal app
+alwaysApply: true
+---
+
+- Production web app: Express + Vite + React + TS + Tailwind + shadcn/ui, deployed on Railway.
+- NEVER fabricate legal citations, statutes, deadlines, or ticket data. Every policy fact must trace to an official City of Albany primary source.
+- Ticket lookup is a guided hand-off to the official portal (albany.rmcpay.com). It is WAF/CAPTCHA-protected — do not proxy, scrape, or bypass it.
+- For external nav in cross-origin/iframe contexts use a real `<a target="_blank" rel="noopener noreferrer">`, never window.open (Safari COOP blocks it).
+- Backend API lives in server/routes.ts; frontend entry is client/src/pages/home.tsx.
+- Env vars are all optional (PORT, OPENAI_API_KEY, OPENAI_VISION_MODEL) — see .env.example. OCR degrades gracefully without a key.
+- Build: `npm run build` → dist/index.cjs + dist/public. Start: `npm start`. Dev: `npm run dev` on :5000.

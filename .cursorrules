@@ -1,0 +1,42 @@
+# Albany Parking Ticket Appeal — Cursor Project Rules
+
+## What this app is
+A production web app helping City of Albany, NY residents appeal parking
+tickets. Express + Vite + React + TypeScript + Tailwind + shadcn/ui, built
+into a single bundle. Deployed on Railway.
+
+## Hard rules (non-negotiable)
+- NEVER fabricate or hallucinate legal citations, statutes, deadlines, or
+  ticket data. Every policy fact must trace to an official City of Albany
+  source. If a fact can't be verified from a primary source, do not state it.
+- The ticket lookup is a GUIDED HAND-OFF to the official portal
+  (albany.rmcpay.com). That portal is WAF/CAPTCHA-protected — do NOT attempt
+  to proxy, scrape, or bypass it. Collect plate+state, copy plate, open the
+  official portal in a new tab.
+- For external navigation inside iframes/cross-origin contexts, use a real
+  <a target="_blank" rel="noopener noreferrer">, never programmatic
+  window.open (Safari blocks it via COOP).
+
+## Architecture
+- client/  — React frontend (single hash route, see src/pages/home.tsx)
+- server/  — Express backend (routes.ts has the API endpoints)
+- shared/  — shared types
+- script/build.ts — build entry (produces dist/index.cjs + dist/public)
+
+## API endpoints (server/routes.ts)
+- GET  /api/health
+- POST /api/extract-ticket  — optional OpenAI vision OCR; degrades gracefully
+  to {ok:false, unavailable:true} when OPENAI_API_KEY is unset. Rate-limited.
+- POST /api/submit-foil      — logs server-side; client completes via mailto.
+
+## Env vars (all optional — see .env.example)
+- PORT (Railway injects; don't set manually)
+- OPENAI_API_KEY (enables photo auto-fill)
+- OPENAI_VISION_MODEL (default: gpt-4o)
+
+## Commands
+- npm install        # first time (node_modules not included in zip)
+- npm run dev        # local dev on :5000
+- npm run build      # production build
+- npm start          # run production bundle
+- npm run check      # tsc typecheck
