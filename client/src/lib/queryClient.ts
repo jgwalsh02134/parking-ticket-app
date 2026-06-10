@@ -14,14 +14,23 @@ export async function apiRequest(
   url: string,
   data?: unknown | undefined,
 ): Promise<Response> {
-  const res = await fetch(`${API_BASE}${url}`, {
+  const res = await apiRequestRaw(method, url, data);
+  await throwIfResNotOk(res);
+  return res;
+}
+
+// Like apiRequest, but never throws on non-2xx — for endpoints whose error
+// bodies carry user-facing messages the caller wants to display.
+export async function apiRequestRaw(
+  method: string,
+  url: string,
+  data?: unknown | undefined,
+): Promise<Response> {
+  return fetch(`${API_BASE}${url}`, {
     method,
     headers: data ? { "Content-Type": "application/json" } : {},
     body: data ? JSON.stringify(data) : undefined,
   });
-
-  await throwIfResNotOk(res);
-  return res;
 }
 
 type UnauthorizedBehavior = "returnNull" | "throw";

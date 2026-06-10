@@ -6,7 +6,7 @@ import {
   FolderOpen, FileSearch, Send, ArrowLeft, Printer, Gavel,
   Search, Camera, Building2, Sparkles, Undo2,
 } from "lucide-react";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, apiRequestRaw } from "@/lib/queryClient";
 import {
   TicketForm, emptyForm, SITUATIONS, DEFENSES, strengthLabel,
   fmtDate, deadlineInfo, buildLetter, BUREAU_AUTHORITY,
@@ -212,9 +212,12 @@ export default function Home() {
     setAiMatching(true);
     setAiMatchMsg(null);
     try {
-      const res = await apiRequest("POST", "/api/suggest-situation", { description: aiDesc });
-      const json = await res.json();
-      if (json.ok && json.situation) {
+      const res = await apiRequestRaw("POST", "/api/suggest-situation", { description: aiDesc });
+      // Read the body even on 4xx/5xx — server validation errors carry a
+      // user-facing message. Rate-limit (429) responses may be plain text.
+      let json: any = null;
+      try { json = await res.json(); } catch { json = null; }
+      if (json?.ok && json.situation) {
         setSit(json.situation);
         // Carry the resident's own words into the "Add your own details" field
         // on the next step, so they don't have to type it twice.
@@ -225,7 +228,7 @@ export default function Home() {
           text: `Matched: “${matched?.title || json.situation}”. ${json.reason || ""} If that's not right, just pick a different one above.`,
         });
       } else {
-        setAiMatchMsg({ kind: "err", text: json.message || "Couldn't match it automatically — pick the closest situation above." });
+        setAiMatchMsg({ kind: "err", text: json?.message || json?.error || "Couldn't match it automatically — pick the closest situation above." });
       }
     } catch {
       setAiMatchMsg({ kind: "err", text: "Couldn't match it automatically — pick the closest situation above." });
@@ -239,13 +242,16 @@ export default function Home() {
     setPolishing(true);
     setPolishMsg(null);
     try {
-      const res = await apiRequest("POST", "/api/polish-letter", { letter });
-      const json = await res.json();
-      if (json.ok && json.letter) {
+      const res = await apiRequestRaw("POST", "/api/polish-letter", { letter });
+      // Read the body even on 4xx/5xx — server validation errors carry a
+      // user-facing message. Rate-limit (429) responses may be plain text.
+      let json: any = null;
+      try { json = await res.json(); } catch { json = null; }
+      if (json?.ok && json.letter) {
         setPolished(json.letter);
         setPolishMsg({ kind: "ok", text: "Polished for clarity and tone. Read it through before sending — your facts and citations are unchanged, and you can switch back anytime." });
       } else {
-        setPolishMsg({ kind: "err", text: json.message || "Couldn't polish right now — your original letter is ready to send as-is." });
+        setPolishMsg({ kind: "err", text: json?.message || json?.error || "Couldn't polish right now — your original letter is ready to send as-is." });
       }
     } catch {
       setPolishMsg({ kind: "err", text: "Couldn't polish right now — your original letter is ready to send as-is." });
