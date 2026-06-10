@@ -5,8 +5,10 @@ import {
   MessageSquare, Loader2, X, CheckCircle2, Scale, ExternalLink,
   FolderOpen, FileSearch, Send, ArrowLeft, Printer, Gavel,
   Search, Camera, Building2, Sparkles, Undo2,
+  Lock, RotateCcw, ArrowRight, Paperclip,
 } from "lucide-react";
 import { apiRequest, apiRequestRaw } from "@/lib/queryClient";
+import { storageAvailable, loadState, saveState, clearState } from "@/lib/persist";
 import {
   TicketForm, emptyForm, SITUATIONS, DEFENSES, strengthLabel,
   fmtDate, deadlineInfo, buildLetter, BUREAU_AUTHORITY,
@@ -57,27 +59,61 @@ function useDark() {
   return [dark, () => setDark((d) => !d)] as const;
 }
 
+// Single source of truth for the "Not legal advice" disclaimer so it can render
+// in both the footer and the Appeal step without duplicating/rewording the
+// legal substance. Edit the wording here only.
+function LegalDisclaimer({ className = "" }: { className?: string }) {
+  return (
+    <p className={className} data-testid="text-legal-disclaimer">
+      <b>Not legal advice.</b> This free tool helps Albany residents prepare a parking-ticket appeal using the City's published Parking Violations Bureau rules.
+      It does not create an attorney-client relationship and does not guarantee a result. Deadlines are calculated from the violation date you enter — always confirm the date on your ticket.
+      Public-safety violations (fire hydrant, handicapped, crosswalk, obstruction, red-light and school-zone cameras) face a higher standard and are not voided without solid proof.
+      For anything serious or for a hearing, consider consulting a licensed New York attorney.
+    </p>
+  );
+}
+
 export default function Home() {
   const [dark, toggleDark] = useDark();
-  const [step, setStep] = useState(0);
-  const [sit, setSit] = useState<string | null>(null);
-  const [f, setF] = useState<TicketForm>(emptyForm);
+
+  // Resume-after-close: best-effort, client-only. storageAvailable() is false
+  // in sandboxed iframes where localStorage throws, so the whole feature
+  // (restore + autosave + the "Start over" control) cleanly disables itself.
+  const canPersist = useMemo(() => storageAvailable(), []);
+  const restored = useMemo(() => (canPersist ? loadState() : null), [canPersist]);
+  const [hasSaved, setHasSaved] = useState(() => restored != null);
+
+  const [step, setStep] = useState<number>(restored?.step ?? 0);
+  const [sit, setSit] = useState<string | null>(restored?.sit ?? null);
+  // Merge over the empty defaults so an older stored blob missing newer fields
+  // can't produce undefined-field crashes (VERSION already gates big changes).
+  const [f, setF] = useState<TicketForm>(
+    restored?.f ? { ...emptyForm, ...(restored.f as Partial<TicketForm>) } : emptyForm
+  );
   const [copied, setCopied] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // Step 0 inline validation: only show field errors after a continue attempt.
+  const [triedContinue, setTriedContinue] = useState(false);
+  // Hero CTA target — smooth-scroll/focus the first required field.
+  const ticketRef = useRef<HTMLInputElement>(null);
 
   // FOIL feature state
   const [foilMode, setFoilMode] = useState(false);
-  const [foil, setFoil] = useState<FoilForm>(emptyFoil);
+  const [foil, setFoil] = useState<FoilForm>(
+    restored?.foil ? { ...emptyFoil, ...(restored.foil as Partial<FoilForm>) } : emptyFoil
+  );
   const [foilCopied, setFoilCopied] = useState(false);
   const [foilSubmitting, setFoilSubmitting] = useState(false);
   const [foilSubmitMsg, setFoilSubmitMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
   // FOIL denial-appeal state
   const [appealMode, setAppealMode] = useState(false);
-  const [fap, setFap] = useState<FoilAppealForm>(emptyFoilAppeal);
+  const [fap, setFap] = useState<FoilAppealForm>(
+    restored?.fap ? { ...emptyFoilAppeal, ...(restored.fap as Partial<FoilAppealForm>) } : emptyFoilAppeal
+  );
   const [fapCopied, setFapCopied] = useState(false);
 
   // Check my open tickets (official portal hand-off)
@@ -109,6 +145,28 @@ export default function Home() {
   const displayLetter = polished ?? letter;
   const canStep1 = f.ticket && f.vdate;
   const foilLetter = useMemo(() => buildFoilLetter(f, sit || "", foil), [f, sit, foil]);
+
+  // Autosave in-progress work to the browser (never to a server). No-ops when
+  // storage is unavailable. Marks that there's resumable state so the
+  // "Start over" control can appear.
+  useEffect(() => {
+    if (!canPersist) return;
+    saveState({ step, sit, f, foil, fap });
+    setHasSaved(true);
+  }, [canPersist, step, sit, f, foil, fap]);
+
+  // Smooth-scroll to and focus the first ticket field (hero CTA).
+  const focusTicket = () => {
+    ticketRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => ticketRef.current?.focus(), 300);
+  };
+
+  // Attempt to advance past step 0; surface inline errors if required fields
+  // are missing (keeps the disabled-look button as a secondary cue).
+  const tryContinueStep1 = () => {
+    if (canStep1) { setTriedContinue(false); setStep(1); }
+    else setTriedContinue(true);
+  };
 
   const openFoil = () => {
     // Pre-check the records that match the resident's situation.
@@ -317,7 +375,7 @@ export default function Home() {
     window.open(`mailto:parkingticketappeal@albanyny.gov?subject=${subject}&body=${body}`, "_blank");
   };
 
-  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkPlate(""); setLkState("NY"); setAiDesc(""); setAiMatchMsg(null); setPolished(null); setPolishMsg(null); };
+  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkPlate(""); setLkState("NY"); setAiDesc(""); setAiMatchMsg(null); setPolished(null); setPolishMsg(null); setTriedContinue(false); clearState(); setHasSaved(false); };
 
   const inputCls = "w-full rounded-md border border-input bg-secondary/40 px-3 py-2.5 text-sm focus:border-primary focus:bg-background focus:outline-none focus:ring-2 focus:ring-primary/25 transition";
   const labelCls = "block text-sm font-semibold mb-1.5";
@@ -361,7 +419,13 @@ export default function Home() {
               </div>
             ))}
           </div>
-          <div className="mt-7 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+          <div className="mt-7">
+            <button onClick={focusTicket} data-testid="button-hero-start"
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground hover-elevate">
+              Start your appeal <ArrowRight size={16} />
+            </button>
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
             <span className="text-muted-foreground">Not sure what you owe?</span>
             <button onClick={openLookup} data-testid="button-open-lookup-hero"
               className="inline-flex items-center gap-1.5 font-semibold text-primary underline-offset-4 hover:underline">
@@ -575,7 +639,7 @@ export default function Home() {
                 </p>
                 <div className="flex flex-wrap gap-3">
                   <button onClick={fapMailto} data-testid="button-appeal-email"
-                    className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate"><Mail size={16} /> Open email to send</button>
+                    className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate"><Mail size={16} /> Open in your email app</button>
                   <button onClick={() => printLetter(foilAppealLetter, `FOIL Appeal — Ticket ${f.ticket || ""}`)} data-testid="button-appeal-print"
                     className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Printer size={16} /> Save as PDF / print</button>
                   <button onClick={fapCopy} data-testid="button-appeal-copy"
@@ -699,7 +763,7 @@ export default function Home() {
                     {foilSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />} Submit request
                   </button>
                   <button onClick={foilMailto} data-testid="button-foil-email"
-                    className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Mail size={16} /> Open email</button>
+                    className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Mail size={16} /> Open in your email app</button>
                   <button onClick={() => printLetter(foilLetter, `FOIL Request — Ticket ${f.ticket || ""}`)} data-testid="button-foil-print"
                     className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Printer size={16} /> Save as PDF / print</button>
                   <button onClick={foilCopy} data-testid="button-foil-copy"
@@ -707,7 +771,8 @@ export default function Home() {
                   <a href={FOIL_CONTACT.portalInfo} target="_blank" rel="noopener noreferrer" data-testid="link-foil-portal"
                     className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><ExternalLink size={16} /> Official FOIL portal</a>
                 </div>
-                <p className="mt-3 text-xs text-muted-foreground">
+                <p className="mt-3 flex items-start gap-1.5 text-xs text-muted-foreground"><Paperclip size={13} className="mt-0.5 shrink-0" /> "Open in your email app" pre-fills the request, but can't attach files — add any enclosures yourself before sending.</p>
+                <p className="mt-2 text-xs text-muted-foreground">
                   Prefer the City's online portal? Use “Official FOIL portal” — you can paste the copied letter there. Mail/in-person: {FOIL_CONTACT.addressLines.join(", ")}. Phone {FOIL_CONTACT.phone}.
                 </p>
               </div>
@@ -725,6 +790,20 @@ export default function Home() {
             </div>
           ) : (
           <>
+          {/* Resume notice + clear control (only when browser storage works) */}
+          {canPersist && hasSaved && (
+            <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-border bg-secondary/30 px-4 py-2.5 text-xs" data-testid="banner-resume">
+              <span className="flex items-center gap-2 text-muted-foreground">
+                <Info size={14} className="shrink-0 text-primary" />
+                Your progress is saved in this browser so you can finish later.
+              </span>
+              <button onClick={reset} data-testid="button-clear-progress"
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border px-3 py-1.5 font-semibold hover-elevate">
+                <RotateCcw size={13} /> Start over
+              </button>
+            </div>
+          )}
+
           {/* Stepper */}
           <div className="mb-8 flex gap-2">
             {STEPS.map((s, i) => (
@@ -783,8 +862,20 @@ export default function Home() {
               )}
 
               <div className="grid gap-4 sm:grid-cols-2">
-                <div><label className={labelCls}>Ticket / citation number *</label><input className={inputCls} value={f.ticket} onChange={setField("ticket")} placeholder="e.g. 1234567" data-testid="input-ticket" /></div>
-                <div><label className={labelCls}>Date of violation *</label><input type="date" className={inputCls} value={f.vdate} onChange={setField("vdate")} data-testid="input-vdate" /></div>
+                <div>
+                  <label className={labelCls}>Ticket / citation number *</label>
+                  <input ref={ticketRef} className={inputCls} value={f.ticket} onChange={setField("ticket")} placeholder="e.g. 1234567" data-testid="input-ticket" />
+                  {triedContinue && !f.ticket && (
+                    <p className="mt-1.5 text-xs font-medium text-destructive" data-testid="error-ticket">Enter your ticket number.</p>
+                  )}
+                </div>
+                <div>
+                  <label className={labelCls}>Date of violation *</label>
+                  <input type="date" className={inputCls} value={f.vdate} onChange={setField("vdate")} data-testid="input-vdate" />
+                  {triedContinue && !f.vdate && (
+                    <p className="mt-1.5 text-xs font-medium text-destructive" data-testid="error-vdate">Enter the date of violation.</p>
+                  )}
+                </div>
               </div>
               <div className="mt-4"><label className={labelCls}>Location <span className="font-normal text-muted-foreground/70">(optional)</span></label><input className={inputCls} value={f.location} onChange={setField("location")} placeholder="e.g. 100 State St, near Eagle St" data-testid="input-location" /></div>
               <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -812,8 +903,8 @@ export default function Home() {
 
               <div className="mt-8 flex items-center justify-between">
                 <span />
-                <button disabled={!canStep1} onClick={() => setStep(1)} data-testid="button-continue-1"
-                  className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate disabled:opacity-40 disabled:cursor-not-allowed">
+                <button onClick={tryContinueStep1} aria-disabled={!canStep1} data-testid="button-continue-1"
+                  className={`inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate ${!canStep1 ? "opacity-40" : ""}`}>
                   Continue →
                 </button>
               </div>
@@ -948,6 +1039,18 @@ export default function Home() {
                 <div><label className={labelCls}>Phone</label><input className={inputCls} value={f.phone} onChange={setField("phone")} placeholder="(518) 555-0100" data-testid="input-phone" /></div>
               </div>
 
+              {/* Data transparency — accurate to the actual architecture: the letter
+                  is built in-browser and sent via the user's own email app. Only the
+                  optional photo/AI features send content to a server + AI provider. */}
+              <div className="mt-4 flex items-start gap-2 rounded-lg bg-secondary/40 px-4 py-3 text-xs text-muted-foreground" data-testid="text-data-statement">
+                <Lock size={14} className="mt-0.5 shrink-0 text-primary" />
+                <div>
+                  Your appeal is generated in your browser and sent through your own email app — your name and contact details aren't stored on our server.
+                  The optional photo-reader and AI buttons are the exception: they send that content to our server and on to an AI provider to process it. {" "}
+                  <a href="#/privacy" className="font-semibold text-primary underline-offset-2 hover:underline" data-testid="link-privacy-inline">How we handle your data</a>.
+                </div>
+              </div>
+
               {f.isCamera && (
                 <div className="mt-5 flex items-start gap-3 rounded-lg bg-[hsl(33_70%_40%/0.12)] px-4 py-3 text-sm text-[hsl(33_70%_36%)] dark:text-[hsl(33_70%_62%)]">
                   <TriangleAlert size={18} className="mt-0.5 shrink-0" />
@@ -989,11 +1092,11 @@ export default function Home() {
                   <p className="mb-3 text-xs leading-relaxed text-muted-foreground">Albany recommends email as the easiest, fastest way to appeal a parking ticket.</p>
                   <div className="mb-3 text-xs font-semibold">parkingticketappeal@albanyny.gov</div>
                   <div className="flex flex-wrap gap-3">
-                    <button onClick={mailto} data-testid="button-email" className="inline-flex items-center gap-2 rounded-md bg-accent px-5 py-2.5 text-sm font-semibold text-accent-foreground hover-elevate"><Mail size={16} /> Open email</button>
+                    <button onClick={mailto} data-testid="button-email" className="inline-flex items-center gap-2 rounded-md bg-accent px-5 py-2.5 text-sm font-semibold text-accent-foreground hover-elevate"><Mail size={16} /> Open in your email app</button>
                     <button onClick={() => printLetter(displayLetter, `Parking Ticket Appeal — Ticket ${f.ticket || ""}`)} data-testid="button-print" className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Printer size={16} /> Save as PDF / print</button>
                     <button onClick={copy} data-testid="button-copy" className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Copy size={16} /> {copied ? "Copied!" : "Copy text"}</button>
                   </div>
-                  <p className="mt-3 text-xs text-muted-foreground">Remember to attach your evidence files before sending.</p>
+                  <p className="mt-3 flex items-start gap-1.5 text-xs text-muted-foreground"><Paperclip size={13} className="mt-0.5 shrink-0" /> Your email app opens with the letter pre-filled, but it can't attach files for you — add your evidence photos/documents yourself before sending.</p>
                 </div>
                 <div className="rounded-xl border border-border bg-secondary/30 p-5">
                   <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold"><MapPin size={18} /> Or mail / visit in person</h4>
@@ -1007,6 +1110,21 @@ export default function Home() {
                 <Check size={18} className="mt-0.5 shrink-0" /><div><b>Before you send:</b> double-check the deadline, attach every piece of evidence from the previous step, and keep a copy of what you send.</div>
               </div>
 
+              {/* What happens after I send? — kept general and non-committal.
+                  We do NOT assert a specific response timeline because we could
+                  not verify one from an official City source.
+                  TODO(verify): exact PVB appeal-response window and the formal
+                  denial/hearing procedure, from albanyny.gov primary source. */}
+              <div className="mt-6 rounded-xl border border-border bg-secondary/30 p-5" data-testid="card-after-send">
+                <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold"><Clock size={18} /> What happens after I send?</h4>
+                <ul className="space-y-2 text-sm text-muted-foreground">
+                  <li className="flex items-start gap-2"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" /> The Parking Violations Bureau reviews your statement and the evidence. Keep your copy and a record of the date you sent it.</li>
+                  <li className="flex items-start gap-2"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" /> If a hearing is needed, the Bureau will contact you with a date and time — your letter already asks them to. Don't pay the ticket while you're contesting it; paying counts as pleading guilty.</li>
+                  <li className="flex items-start gap-2"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" /> If your appeal is denied, you can ask the Bureau about your options, including a hearing before a hearing examiner. Confirm the current procedure on the <a href="https://www.albanyny.gov/403/Parking-Violations-Bureau" target="_blank" rel="noopener noreferrer" className="font-semibold text-primary underline-offset-2 hover:underline">City's official Parking Violations Bureau page</a>.</li>
+                  <li className="flex items-start gap-2"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" /> Want the City's own evidence — ticket photos, meter/payment logs, sign records, or camera calibration certificates? You can <button onClick={openFoil} data-testid="link-after-send-foil" className="font-semibold text-primary underline-offset-2 hover:underline">file a FOIL request</button> to compel the City to produce it.</li>
+                </ul>
+              </div>
+
               {/* FOIL entry card */}
               <button onClick={openFoil} data-testid="button-open-foil"
                 className="mt-6 flex w-full items-center gap-4 rounded-xl border border-primary/40 bg-primary/5 p-5 text-left transition hover-elevate">
@@ -1018,6 +1136,9 @@ export default function Home() {
                 <span className="shrink-0 text-primary"><FileSearch size={18} /></span>
               </button>
 
+              {/* Legal disclaimer surfaced on the Appeal step (same text as footer) */}
+              <LegalDisclaimer className="mt-6 rounded-lg border border-dashed border-border bg-secondary/30 px-4 py-3 text-xs leading-relaxed text-muted-foreground/80" />
+
               <div className="mt-8 flex items-center justify-between">
                 <button onClick={() => setStep(2)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
                 <button onClick={reset} data-testid="button-reset" className="rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">Start another ticket</button>
@@ -1028,12 +1149,7 @@ export default function Home() {
           )}
         </div>
 
-        <p className="mt-6 border-t border-dashed border-border pt-4 text-xs leading-relaxed text-muted-foreground/80">
-          <b>Not legal advice.</b> This free tool helps Albany residents prepare a parking-ticket appeal using the City's published Parking Violations Bureau rules.
-          It does not create an attorney-client relationship and does not guarantee a result. Deadlines are calculated from the violation date you enter — always confirm the date on your ticket.
-          Public-safety violations (fire hydrant, handicapped, crosswalk, obstruction, red-light and school-zone cameras) face a higher standard and are not voided without solid proof.
-          For anything serious or for a hearing, consider consulting a licensed New York attorney.
-        </p>
+        <LegalDisclaimer className="mt-6 border-t border-dashed border-border pt-4 text-xs leading-relaxed text-muted-foreground/80" />
       </main>
 
       <footer className="border-t border-border py-8">
@@ -1055,6 +1171,9 @@ export default function Home() {
           </p>
           <p className="text-xs leading-relaxed text-muted-foreground/60">
             Note on camera tickets: Albany's school-zone speed cameras are governed by NY VTL §1180-f. NY VTL §1111-a red-light cameras apply only to New York City; Albany's authority for any red-light camera program is not established by a statute we could verify, so confirm the citation on your specific camera notice before relying on it.
+          </p>
+          <p className="text-xs text-muted-foreground/70">
+            <a href="#/privacy" className="font-semibold text-primary underline-offset-2 hover:underline" data-testid="link-privacy-footer">Privacy &amp; your data</a>
           </p>
         </div>
       </footer>
