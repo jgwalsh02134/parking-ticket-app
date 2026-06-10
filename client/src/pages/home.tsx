@@ -387,7 +387,7 @@ export default function Home() {
               <p className="mb-6 text-sm text-muted-foreground">
                 The City of Albany lets you see every open parking citation tied to your vehicle on its official
                 <a className="text-primary underline decoration-dotted" href={LOOKUP_PORTAL.parkingUrl} target="_blank" rel="noopener"> Ticketing &amp; Enforcement portal</a>.
-                Enter your plate and state below — we'll copy your plate and take you straight there.
+                Enter your plate and state below — we'll copy your plate so you just paste it on the portal, no retyping.
               </p>
 
               <div className="grid gap-4 sm:grid-cols-2">
@@ -408,27 +408,58 @@ export default function Home() {
                 </div>
               </div>
 
+              {/* Ready-to-paste card — the exact values to enter on the portal.
+                  The plate is copied to the clipboard; the state must be picked
+                  from the portal's dropdown (you can't paste into a <select>),
+                  so we show its exact name. */}
+              <div className="mt-6 rounded-xl border border-primary/40 bg-primary/5 p-4" data-testid="card-lookup-paste">
+                <div className="mb-3 text-sm font-semibold">Enter these on the portal</div>
+                <div className="flex flex-wrap items-end gap-4">
+                  <div className="flex-1 min-w-[12rem]">
+                    <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">License plate — paste this</div>
+                    <div className="flex items-center gap-2">
+                      <code className="rounded-md border border-border bg-background px-3 py-2 font-mono text-lg font-bold tracking-widest" data-testid="text-lookup-plate-big">
+                        {lkPlate ? lkPlate.trim().toUpperCase() : "—"}
+                      </code>
+                      <button onClick={lkCopyPlate} disabled={!lkPlate} data-testid="button-lookup-copy"
+                        className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-xs font-semibold hover-elevate disabled:opacity-40 disabled:cursor-not-allowed">
+                        {lkCopied ? <><Check size={14} className="text-accent" /> Copied</> : <><Copy size={14} /> Copy</>}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="min-w-[10rem]">
+                    <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">State — select this</div>
+                    <div className="rounded-md border border-border bg-background px-3 py-2 text-sm font-semibold" data-testid="text-lookup-state-big">
+                      {lkResolvedState ? lkResolvedState.name : "—"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               {/* What you'll do on the portal */}
-              <div className="mt-6 rounded-xl border border-border bg-secondary/30 p-4">
+              <div className="mt-4 rounded-xl border border-border bg-secondary/30 p-4">
                 <div className="mb-2 text-sm font-semibold">What happens next</div>
                 <ol className="space-y-1.5 text-sm text-muted-foreground">
-                  <li>1. We open the City's official portal in a new tab and copy your plate.</li>
-                  <li>2. In the box labeled <b>“To see all open citations for your vehicle…”</b>, paste your plate ({lkPlate ? <b className="text-foreground">{lkPlate.trim().toUpperCase()}</b> : "your plate"}) and pick <b className="text-foreground">{lkResolvedState ? lkResolvedState.name : "your state"}</b>.</li>
+                  <li>1. Press <b>Open the City portal</b> — it opens in a new tab and your plate is copied automatically.</li>
+                  <li>2. In the box labeled <b>“To see all open citations for your vehicle…”</b>, paste your plate (⌘/Ctrl+V) and pick <b className="text-foreground">{lkResolvedState ? lkResolvedState.name : "your state"}</b> from the dropdown.</li>
                   <li>3. Complete the quick “Human Verification” check, then press <b>Search</b>.</li>
                   <li>4. Every open citation, its status, and the amount due will appear.</li>
                 </ol>
               </div>
 
               <div className="mt-5 flex flex-wrap gap-3">
-                <a href={LOOKUP_PORTAL.parkingUrl} target="_blank" rel="noopener noreferrer"
-                  onClick={lkOnOpenPortal} data-testid="button-lookup-open"
-                  className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">
-                  <ExternalLink size={16} /> Open the City portal
-                </a>
-                <button onClick={lkCopyPlate} disabled={!lkPlate} data-testid="button-lookup-copy"
-                  className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate disabled:opacity-40 disabled:cursor-not-allowed">
-                  {lkCopied ? <><Check size={16} className="text-accent" /> Plate copied</> : <><Copy size={16} /> Copy plate</>}
-                </button>
+                {lkPlate ? (
+                  <a href={LOOKUP_PORTAL.parkingUrl} target="_blank" rel="noopener noreferrer"
+                    onClick={lkOnOpenPortal} data-testid="button-lookup-open"
+                    className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">
+                    <ExternalLink size={16} /> Open the City portal &amp; copy my plate
+                  </a>
+                ) : (
+                  <button disabled data-testid="button-lookup-open-disabled"
+                    className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground opacity-40 cursor-not-allowed">
+                    <ExternalLink size={16} /> Enter your plate first
+                  </button>
+                )}
               </div>
 
               {/* Why we hand off rather than show results inline */}
