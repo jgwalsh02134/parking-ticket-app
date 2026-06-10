@@ -33,6 +33,8 @@ All variables are **optional** — the app runs fully without any of them. See [
 | `PORT` | No | `5000` | Server port. Railway sets this automatically. |
 | `OPENAI_API_KEY` | No | — | Enables "snap a photo of your ticket" auto-fill (OpenAI vision OCR). Without it, the app asks the user to type fields manually. |
 | `OPENAI_VISION_MODEL` | No | `gpt-4o` | Vision model used for OCR. |
+| `XAI_API_KEY` | No | — | Enables the xAI (Grok) assist features: "Match my situation" (classifies a plain-English description into one of the curated situations) and "Polish my letter" (copy-edits tone/clarity; never changes facts or citations). Without it, both degrade gracefully. |
+| `XAI_MODEL` | No | `grok-4.3` | Grok model used for the assist features. |
 
 ## Deploy to Railway
 

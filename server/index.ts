@@ -26,16 +26,16 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
-// Throttle the LLM-backed OCR endpoint to prevent cost-amplification abuse.
-app.use(
-  "/api/extract-ticket",
-  rateLimit({
-    windowMs: 60_000,
-    max: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-  }),
-);
+// Throttle all LLM-backed endpoints to prevent cost-amplification abuse.
+const aiLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use("/api/extract-ticket", aiLimiter);
+app.use("/api/suggest-situation", aiLimiter);
+app.use("/api/polish-letter", aiLimiter);
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -109,7 +109,8 @@ app.use((req, res, next) => {
     {
       port,
       host: "0.0.0.0",
-      reusePort: true,
+      // SO_REUSEPORT is Linux-only; macOS throws ENOTSUP (breaks local dev).
+      reusePort: process.platform === "linux",
     },
     () => {
       log(`serving on port ${port}`);

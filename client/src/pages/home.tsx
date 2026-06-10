@@ -4,7 +4,7 @@ import {
   Receipt, Car, Signpost, ParkingMeter, FileText, TriangleAlert, HeartPulse,
   MessageSquare, Loader2, X, CheckCircle2, Scale, ExternalLink,
   FolderOpen, FileSearch, Send, ArrowLeft, Printer, Gavel,
-  Search, Camera, Building2,
+  Search, Camera, Building2, Sparkles, Undo2,
 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import {
@@ -86,12 +86,27 @@ export default function Home() {
   const [lkState, setLkState] = useState("NY");
   const [lkCopied, setLkCopied] = useState(false);
 
+  // AI situation matcher (xAI Grok) — classifies a plain-English description
+  // into one of the 8 curated situations. Never generates legal content.
+  const [aiDesc, setAiDesc] = useState("");
+  const [aiMatching, setAiMatching] = useState(false);
+  const [aiMatchMsg, setAiMatchMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  // AI letter polish (xAI Grok) — copy-edits the generated letter; facts and
+  // citations are preserved, and the resident can revert to the original.
+  const [polishing, setPolishing] = useState(false);
+  const [polished, setPolished] = useState<string | null>(null);
+  const [polishMsg, setPolishMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
   const setField = (k: keyof TicketForm) => (e: any) =>
     setF((p) => ({ ...p, [k]: e.target.value }));
 
   const { days, deadline, daysLeft } = useMemo(() => deadlineInfo(f), [f.vdate, f.isCamera]);
   const def = sit ? DEFENSES[sit] : null;
   const letter = useMemo(() => (sit ? buildLetter(f, sit) : ""), [f, sit]);
+  // A polished version goes stale the moment the underlying letter changes.
+  useEffect(() => { setPolished(null); setPolishMsg(null); }, [letter]);
+  const displayLetter = polished ?? letter;
   const canStep1 = f.ticket && f.vdate;
   const foilLetter = useMemo(() => buildFoilLetter(f, sit || "", foil), [f, sit, foil]);
 
@@ -188,6 +203,57 @@ export default function Home() {
     }
   }
 
+  // Ask the AI to match a plain-English description to a situation card.
+  async function aiMatchSituation() {
+    if (aiDesc.trim().length < 10) {
+      setAiMatchMsg({ kind: "err", text: "Add a little more detail — a sentence or two about what happened." });
+      return;
+    }
+    setAiMatching(true);
+    setAiMatchMsg(null);
+    try {
+      const res = await apiRequest("POST", "/api/suggest-situation", { description: aiDesc });
+      const json = await res.json();
+      if (json.ok && json.situation) {
+        setSit(json.situation);
+        // Carry the resident's own words into the "Add your own details" field
+        // on the next step, so they don't have to type it twice.
+        setF((p) => (p.facts.trim() ? p : { ...p, facts: aiDesc.trim() }));
+        const matched = SITUATIONS.find((s) => s.id === json.situation);
+        setAiMatchMsg({
+          kind: "ok",
+          text: `Matched: “${matched?.title || json.situation}”. ${json.reason || ""} If that's not right, just pick a different one above.`,
+        });
+      } else {
+        setAiMatchMsg({ kind: "err", text: json.message || "Couldn't match it automatically — pick the closest situation above." });
+      }
+    } catch {
+      setAiMatchMsg({ kind: "err", text: "Couldn't match it automatically — pick the closest situation above." });
+    } finally {
+      setAiMatching(false);
+    }
+  }
+
+  // Ask the AI to copy-edit the appeal letter (facts and citations preserved).
+  async function polishLetter() {
+    setPolishing(true);
+    setPolishMsg(null);
+    try {
+      const res = await apiRequest("POST", "/api/polish-letter", { letter });
+      const json = await res.json();
+      if (json.ok && json.letter) {
+        setPolished(json.letter);
+        setPolishMsg({ kind: "ok", text: "Polished for clarity and tone. Read it through before sending — your facts and citations are unchanged, and you can switch back anytime." });
+      } else {
+        setPolishMsg({ kind: "err", text: json.message || "Couldn't polish right now — your original letter is ready to send as-is." });
+      }
+    } catch {
+      setPolishMsg({ kind: "err", text: "Couldn't polish right now — your original letter is ready to send as-is." });
+    } finally {
+      setPolishing(false);
+    }
+  }
+
   async function handleFile(file: File) {
     if (!file) return;
     if (file.size > 10 * 1024 * 1024) {
@@ -235,17 +301,17 @@ export default function Home() {
   }
 
   const copy = () => {
-    if (navigator.clipboard) navigator.clipboard.writeText(letter);
+    if (navigator.clipboard) navigator.clipboard.writeText(displayLetter);
     setCopied(true);
     setTimeout(() => setCopied(false), 1800);
   };
   const mailto = () => {
     const subject = encodeURIComponent(`Parking Ticket Appeal — Ticket No. ${f.ticket || ""}`);
-    const body = encodeURIComponent(letter);
+    const body = encodeURIComponent(displayLetter);
     window.open(`mailto:parkingticketappeal@albanyny.gov?subject=${subject}&body=${body}`, "_blank");
   };
 
-  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkPlate(""); setLkState("NY"); };
+  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkPlate(""); setLkState("NY"); setAiDesc(""); setAiMatchMsg(null); setPolished(null); setPolishMsg(null); };
 
   const inputCls = "w-full rounded-md border border-input bg-secondary/40 px-3 py-2.5 text-sm focus:border-primary focus:bg-background focus:outline-none focus:ring-2 focus:ring-primary/25 transition";
   const labelCls = "block text-sm font-semibold mb-1.5";
@@ -741,6 +807,31 @@ export default function Home() {
                   );
                 })}
               </div>
+
+              {/* AI matcher — describe it in your own words */}
+              <div className="mt-6 rounded-xl border border-dashed border-border bg-secondary/30 p-4" data-testid="panel-ai-match">
+                <div className="mb-1 flex items-center gap-2 text-sm font-semibold">
+                  <Sparkles size={16} className="text-primary" /> Not sure which one? Describe it — we'll match it
+                </div>
+                <p className="mb-3 text-xs text-muted-foreground">
+                  Tell us what happened in your own words and AI will pick the situation that fits.
+                  It only chooses from the options above — you can always change it.
+                </p>
+                <textarea className={`${inputCls} min-h-16 resize-y`} value={aiDesc}
+                  onChange={(e) => setAiDesc(e.target.value)} data-testid="input-ai-describe"
+                  placeholder="e.g. I paid in the Park Albany app but typed one letter of my plate wrong, and got a ticket anyway." />
+                <button onClick={aiMatchSituation} disabled={aiMatching || aiDesc.trim().length < 10} data-testid="button-ai-match"
+                  className="mt-3 inline-flex items-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-semibold hover-elevate disabled:opacity-40 disabled:cursor-not-allowed">
+                  {aiMatching ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} Match my situation
+                </button>
+                {aiMatchMsg && (
+                  <div className={`mt-3 flex items-start gap-2 rounded-lg px-3 py-2.5 text-xs ${aiMatchMsg.kind === "ok" ? "bg-accent/12 text-accent" : "bg-destructive/12 text-destructive"}`} data-testid="text-ai-match-msg">
+                    {aiMatchMsg.kind === "ok" ? <CheckCircle2 size={15} className="mt-0.5 shrink-0" /> : <Info size={15} className="mt-0.5 shrink-0" />}
+                    <div>{aiMatchMsg.text}</div>
+                  </div>
+                )}
+              </div>
+
               <div className="mt-8 flex items-center justify-between">
                 <button onClick={() => setStep(0)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
                 <button disabled={!sit} onClick={() => setStep(2)} data-testid="button-continue-2"
@@ -827,7 +918,33 @@ export default function Home() {
                 </div>
               )}
 
-              <div className="mt-6 max-h-[440px] overflow-auto rounded-xl border border-border bg-secondary/30 p-6 font-mono text-[13px] leading-relaxed whitespace-pre-wrap" data-testid="text-letter">{letter}</div>
+              {/* AI polish controls */}
+              <div className="mt-6 flex flex-wrap items-center gap-3">
+                <button onClick={polishLetter} disabled={polishing} data-testid="button-polish"
+                  className="inline-flex items-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-semibold hover-elevate disabled:opacity-50">
+                  {polishing ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} className="text-primary" />}
+                  {polished ? "Polish again" : "Polish my letter with AI"}
+                </button>
+                {polished && (
+                  <button onClick={() => { setPolished(null); setPolishMsg(null); }} data-testid="button-polish-revert"
+                    className="inline-flex items-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-semibold hover-elevate">
+                    <Undo2 size={15} /> Use the original
+                  </button>
+                )}
+                {polished && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1 text-xs font-semibold text-primary">
+                    <Sparkles size={12} /> AI-polished — review before sending
+                  </span>
+                )}
+              </div>
+              {polishMsg && (
+                <div className={`mt-3 flex items-start gap-2 rounded-lg px-3 py-2.5 text-xs ${polishMsg.kind === "ok" ? "bg-accent/12 text-accent" : "bg-destructive/12 text-destructive"}`} data-testid="text-polish-msg">
+                  {polishMsg.kind === "ok" ? <CheckCircle2 size={15} className="mt-0.5 shrink-0" /> : <Info size={15} className="mt-0.5 shrink-0" />}
+                  <div>{polishMsg.text}</div>
+                </div>
+              )}
+
+              <div className="mt-4 max-h-[440px] overflow-auto rounded-xl border border-border bg-secondary/30 p-6 font-mono text-[13px] leading-relaxed whitespace-pre-wrap" data-testid="text-letter">{displayLetter}</div>
 
               <div className="mt-6 grid gap-4 sm:grid-cols-2">
                 <div className="rounded-xl border border-border bg-secondary/30 p-5">
@@ -836,7 +953,7 @@ export default function Home() {
                   <div className="mb-3 text-xs font-semibold">parkingticketappeal@albanyny.gov</div>
                   <div className="flex flex-wrap gap-3">
                     <button onClick={mailto} data-testid="button-email" className="inline-flex items-center gap-2 rounded-md bg-accent px-5 py-2.5 text-sm font-semibold text-accent-foreground hover-elevate"><Mail size={16} /> Open email</button>
-                    <button onClick={() => printLetter(letter, `Parking Ticket Appeal — Ticket ${f.ticket || ""}`)} data-testid="button-print" className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Printer size={16} /> Save as PDF / print</button>
+                    <button onClick={() => printLetter(displayLetter, `Parking Ticket Appeal — Ticket ${f.ticket || ""}`)} data-testid="button-print" className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Printer size={16} /> Save as PDF / print</button>
                     <button onClick={copy} data-testid="button-copy" className="inline-flex items-center gap-2 rounded-md border border-border px-5 py-2.5 text-sm font-semibold hover-elevate"><Copy size={16} /> {copied ? "Copied!" : "Copy text"}</button>
                   </div>
                   <p className="mt-3 text-xs text-muted-foreground">Remember to attach your evidence files before sending.</p>

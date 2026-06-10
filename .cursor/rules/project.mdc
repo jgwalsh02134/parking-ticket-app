@@ -8,5 +8,6 @@ alwaysApply: true
 - Ticket lookup is a guided hand-off to the official portal (albany.rmcpay.com). It is WAF/CAPTCHA-protected — do not proxy, scrape, or bypass it.
 - For external nav in cross-origin/iframe contexts use a real `<a target="_blank" rel="noopener noreferrer">`, never window.open (Safari COOP blocks it).
 - Backend API lives in server/routes.ts; frontend entry is client/src/pages/home.tsx.
-- Env vars are all optional (PORT, OPENAI_API_KEY, OPENAI_VISION_MODEL) — see .env.example. OCR degrades gracefully without a key.
+- Env vars are all optional (PORT, OPENAI_API_KEY, OPENAI_VISION_MODEL, XAI_API_KEY, XAI_MODEL) — see .env.example. OCR and the xAI assist features (situation matching, letter polish) degrade gracefully without keys.
+- xAI features must never generate legal content: /api/suggest-situation only classifies into the 8 curated situation ids; /api/polish-letter only copy-edits (facts and citations preserved verbatim).
 - Build: `npm run build` → dist/index.cjs + dist/public. Start: `npm start`. Dev: `npm run dev` on :5000.

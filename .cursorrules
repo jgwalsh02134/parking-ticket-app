@@ -27,12 +27,21 @@ into a single bundle. Deployed on Railway.
 - GET  /api/health
 - POST /api/extract-ticket  — optional OpenAI vision OCR; degrades gracefully
   to {ok:false, unavailable:true} when OPENAI_API_KEY is unset. Rate-limited.
+- POST /api/suggest-situation — optional xAI (Grok) classifier: maps a
+  plain-English description to one of the 8 curated situation ids. The model
+  ONLY picks from that fixed list — it never generates legal content.
+  Degrades gracefully when XAI_API_KEY is unset. Rate-limited.
+- POST /api/polish-letter   — optional xAI (Grok) copy-edit of the generated
+  letter. Prompt hard-forbids changing facts or adding/altering citations.
+  Degrades gracefully when XAI_API_KEY is unset. Rate-limited.
 - POST /api/submit-foil      — logs server-side; client completes via mailto.
 
 ## Env vars (all optional — see .env.example)
 - PORT (Railway injects; don't set manually)
 - OPENAI_API_KEY (enables photo auto-fill)
 - OPENAI_VISION_MODEL (default: gpt-4o)
+- XAI_API_KEY (enables situation matching + letter polish via api.x.ai)
+- XAI_MODEL (default: grok-4.3)
 
 ## Commands
 - npm install        # first time (node_modules not included in zip)

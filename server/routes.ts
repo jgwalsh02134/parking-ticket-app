@@ -2,6 +2,24 @@ import type { Express, Request, Response } from "express";
 import type { Server } from "node:http";
 import OpenAI from "openai";
 
+// xAI's API is OpenAI-compatible — same SDK, different base URL.
+// https://docs.x.ai/developers/models — "grok-4.3" is the current flagship.
+function xaiClient(): OpenAI | null {
+  if (!process.env.XAI_API_KEY) return null;
+  return new OpenAI({
+    apiKey: process.env.XAI_API_KEY,
+    baseURL: "https://api.x.ai/v1",
+  });
+}
+const XAI_MODEL = () => process.env.XAI_MODEL || "grok-4.3";
+
+// The 8 situation ids the wizard offers (must stay in sync with
+// client/src/lib/appeal.ts SITUATIONS). The AI only ever picks from this list —
+// all legal content stays in the curated, source-verified DEFENSES table.
+const SITUATION_IDS = [
+  "paid", "wrongplate", "signage", "meter", "notmine", "facts", "medical", "other",
+] as const;
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -77,6 +95,136 @@ export async function registerRoutes(
       console.error("extract-ticket error:", err?.message || err);
       return res.status(500).json({
         error: "Could not read the ticket image. You can still enter the details manually.",
+      });
+    }
+  });
+
+  // Match a resident's plain-English description of what happened to one of the
+  // wizard's 8 curated situations. The model ONLY classifies into the fixed list —
+  // it never generates legal arguments, citations, or policy facts (those live in
+  // the hand-verified DEFENSES table on the client). Uses the xAI (Grok) API.
+  // Degrades gracefully when XAI_API_KEY is unset.
+  app.post("/api/suggest-situation", async (req: Request, res: Response) => {
+    try {
+      const { description } = req.body as { description?: string };
+      if (!description || typeof description !== "string" || description.trim().length < 10) {
+        return res.status(400).json({ error: "Describe what happened in a sentence or two." });
+      }
+      if (description.length > 2000) {
+        return res.status(400).json({ error: "Description is too long (max 2000 characters)." });
+      }
+
+      const client = xaiClient();
+      if (!client) {
+        return res.json({
+          ok: false,
+          unavailable: true,
+          message: "AI matching isn't configured on this server. Please pick the situation that fits best.",
+        });
+      }
+
+      const instruction = [
+        "A City of Albany, NY resident is contesting a parking ticket and described what happened in their own words.",
+        "Classify their description into EXACTLY ONE of these situation ids:",
+        '- "paid": they paid for parking (meter or Park Albany app) but were ticketed anyway',
+        '- "wrongplate": the plate, make, state, or vehicle on the ticket does not match their car',
+        '- "signage": the regulating sign was missing, knocked down, obscured, or conflicting',
+        '- "meter": the meter or pay station was broken or would not accept payment',
+        '- "notmine": they did not own or drive the car at the time (sold, rented out, or stolen)',
+        '- "facts": the facts written on the ticket are wrong (wrong date, time, location, or description)',
+        '- "medical": a genuine medical emergency or sudden vehicle breakdown',
+        '- "other": none of the above clearly fits',
+        "Return ONLY a compact JSON object, no prose:",
+        '{ "situation": "<one id from the list>", "confidence": "high"|"medium"|"low", "reason": "<one short sentence, addressed to the resident, explaining why this fits>" }',
+        "Rules: never invent facts the resident did not state; if the description is vague or fits nothing, use \"other\" with low confidence.",
+        "",
+        "Resident's description:",
+        description.trim(),
+      ].join("\n");
+
+      const completion = await client.chat.completions.create({
+        model: XAI_MODEL(),
+        messages: [{ role: "user", content: instruction }],
+        max_tokens: 300,
+        temperature: 0.2,
+      });
+
+      const text: string = completion.choices?.[0]?.message?.content ?? "";
+      let data: Record<string, unknown> = {};
+      const match = text.match(/\{[\s\S]*\}/);
+      if (match) {
+        try { data = JSON.parse(match[0]); } catch { data = {}; }
+      }
+      const situation = SITUATION_IDS.includes(data.situation as any)
+        ? (data.situation as string)
+        : "other";
+      const confidence = ["high", "medium", "low"].includes(data.confidence as any)
+        ? (data.confidence as string)
+        : "low";
+      const reason = typeof data.reason === "string" ? data.reason.slice(0, 300) : "";
+      return res.json({ ok: true, situation, confidence, reason });
+    } catch (err: any) {
+      console.error("suggest-situation error:", err?.message || err);
+      return res.status(500).json({
+        error: "Couldn't match your description automatically. Please pick the situation that fits best.",
+      });
+    }
+  });
+
+  // Polish the resident's appeal / FOIL letter with the xAI (Grok) API: tighten
+  // wording and improve tone WITHOUT changing any facts. The prompt hard-forbids
+  // adding, removing, or altering facts, dates, amounts, names, and legal
+  // citations — the model is a copy editor, never a source of legal content.
+  // Degrades gracefully when XAI_API_KEY is unset.
+  app.post("/api/polish-letter", async (req: Request, res: Response) => {
+    try {
+      const { letter } = req.body as { letter?: string };
+      if (!letter || typeof letter !== "string" || letter.trim().length < 80) {
+        return res.status(400).json({ error: "Provide the full letter text to polish." });
+      }
+      if (letter.length > 20000) {
+        return res.status(400).json({ error: "Letter is too long (max 20000 characters)." });
+      }
+
+      const client = xaiClient();
+      if (!client) {
+        return res.json({
+          ok: false,
+          unavailable: true,
+          message: "AI polish isn't configured on this server. Your letter is ready to send as-is.",
+        });
+      }
+
+      const instruction = [
+        "You are a careful copy editor. Improve the plain-text letter below — a City of Albany, NY parking-ticket appeal or records request — for clarity, flow, and a respectful, confident tone.",
+        "HARD RULES — breaking any of these makes the output unusable:",
+        "1. Do NOT add, remove, or change any fact: dates, times, amounts, ticket numbers, plates, addresses, names, or events.",
+        "2. Do NOT add any legal citation, statute, case, or rule that is not already in the letter. Reproduce every existing citation VERBATIM, character for character.",
+        "3. Do NOT invent evidence, claims, or circumstances the writer did not state.",
+        "4. Keep it plain text (no markdown), keep the letter structure (date, address block, RE line, salutation, body, sign-off), and keep roughly the same length.",
+        "5. Never admit the violation on the writer's behalf.",
+        "Return ONLY the polished letter text — no commentary, no preamble.",
+        "",
+        "Letter:",
+        letter,
+      ].join("\n");
+
+      const completion = await client.chat.completions.create({
+        model: XAI_MODEL(),
+        messages: [{ role: "user", content: instruction }],
+        max_tokens: 4000,
+        temperature: 0.3,
+      });
+
+      const polished = (completion.choices?.[0]?.message?.content ?? "").trim();
+      if (polished.length < 80) {
+        return res.status(500).json({ error: "Couldn't polish the letter. Your original is ready to send as-is." });
+      }
+      return res.json({ ok: true, letter: polished });
+    } catch (err: any) {
+      console.error("polish-letter error:", err?.message || err);
+      return res.status(500).json({
+        error: "Couldn't polish the letter right now. Your original is ready to send as-is.",
       });
     }
   });
