@@ -5,8 +5,9 @@ import {
   MessageSquare, Loader2, X, CheckCircle2, Scale, ExternalLink,
   FolderOpen, FileSearch, Send, ArrowLeft, Printer, Gavel,
   Search, Camera, Building2, Sparkles, Undo2,
-  Lock, RotateCcw, ArrowRight, Paperclip, ScanLine,
+  Lock, RotateCcw, ArrowRight, Paperclip, ScanLine, Smartphone, Monitor,
 } from "lucide-react";
+import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
 import { apiRequest, apiRequestRaw } from "@/lib/queryClient";
 import { storageAvailable, loadState, saveState, clearState } from "@/lib/persist";
 import {
@@ -24,6 +25,52 @@ import { toLetterGrounds, parseCitationText, captureCoverage, type ScanResult, t
 
 const ICONS: Record<string, any> = {
   Receipt, Car, Signpost, ParkingMeter, FileText, TriangleAlert, HeartPulse, MessageSquare,
+};
+
+type CapturePlatform = "ios" | "android" | "desktop";
+
+// Best-effort UA detection for the capture instructions; the user can override
+// with the platform toggle if it's wrong.
+function detectPlatform(): CapturePlatform {
+  if (typeof navigator === "undefined") return "desktop";
+  const ua = navigator.userAgent || "";
+  if (/iPad|iPhone|iPod/.test(ua) || (/(Macintosh)/.test(ua) && "ontouchend" in document)) return "ios";
+  if (/Android/.test(ua)) return "android";
+  return "desktop";
+}
+
+// Verbatim, platform-specific steps for capturing the FULL portal page.
+const CAPTURE_STEPS: Record<CapturePlatform, { label: string; steps: string[] }> = {
+  ios: {
+    label: "iPhone",
+    steps: [
+      'Tap "Open my ticket on the City portal" below and log in.',
+      "Open your ticket so the citation details are on screen.",
+      "Press the Side button + Volume Up together to take a screenshot.",
+      'Tap the screenshot preview in the bottom-left, then tap "Full Page" at the top.',
+      'Tap "Done" → "Save to Files" (saves the entire page as a PDF).',
+      'Come back here, tap "Upload screenshot / PDF," and choose that file. We read the rest.',
+    ],
+  },
+  android: {
+    label: "Android",
+    steps: [
+      'Tap "Open my ticket on the City portal" below and log in.',
+      "Open your ticket so the citation details are on screen.",
+      'Take a screenshot (Power + Volume Down), then tap "Capture more" / "Scroll" to grab the full page.',
+      "If your phone has no full-page option: take 2–3 screenshots, scrolling down between each, and upload them all.",
+      'Come back here, tap "Upload screenshot / PDF," and choose the file(s).',
+    ],
+  },
+  desktop: {
+    label: "Computer",
+    steps: [
+      'Click "Open my ticket on the City portal" and log in.',
+      "Open your ticket's detail page.",
+      'Print to PDF (Ctrl/Cmd+P → "Save as PDF") to capture the full page, OR take a screenshot of the details.',
+      'Return here, click "Upload screenshot / PDF," and choose the file.',
+    ],
+  },
 };
 
 // Wizard stages. The Scan stage (dismissal-first error scan) is the core
@@ -108,6 +155,8 @@ export default function Home() {
   const ticketRef = useRef<HTMLInputElement>(null);
   // Screenshot/photo upload trigger inside the scan sourcing panel.
   const sourceFileRef = useRef<HTMLInputElement>(null);
+  // Visible upload panel (waiting-to-return state) to scroll into view on return.
+  const uploadPanelRef = useRef<HTMLDivElement>(null);
 
   // FOIL feature state
   const [foilMode, setFoilMode] = useState(false);
@@ -161,6 +210,39 @@ export default function Home() {
   // report (what the capture included / missed + how to retake).
   const [captured, setCaptured] = useState(false);
   const coverage = useMemo(() => captureCoverage(f, scanValues), [f, scanValues]);
+
+  // Guided portal round-trip + platform-aware capture instructions.
+  const [capturePlatform, setCapturePlatform] = useState<CapturePlatform>(detectPlatform);
+  const [awaitingReturn, setAwaitingReturn] = useState(false);   // opened portal, waiting for the user to come back
+  const [returned, setReturned] = useState(false);               // app tab regained focus
+  const [capCopied, setCapCopied] = useState(false);             // inline "plate copied" confirmation
+  // The value to paste into the portal search (citation # if known, else plate).
+  const portalSearchValue = (f.ticket || f.plate || "").trim();
+  const copyPortalSearch = () => {
+    if (navigator.clipboard && portalSearchValue) navigator.clipboard.writeText(portalSearchValue.toUpperCase());
+    setCapCopied(true);
+    setTimeout(() => setCapCopied(false), 1800);
+  };
+  const onOpenPortal = () => { copyPortalSearch(); setReturned(false); setAwaitingReturn(true); };
+
+  // When the user switches back to our tab after visiting the portal, surface
+  // the upload panel automatically. Fallback button covers browsers that don't
+  // fire the event. Listener is cleaned up on unmount / when no longer waiting.
+  useEffect(() => {
+    if (!awaitingReturn) return;
+    const onBack = () => {
+      if (document.visibilityState === "visible") {
+        setReturned(true);
+        setTimeout(() => uploadPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 100);
+      }
+    };
+    document.addEventListener("visibilitychange", onBack);
+    window.addEventListener("focus", onBack);
+    return () => {
+      document.removeEventListener("visibilitychange", onBack);
+      window.removeEventListener("focus", onBack);
+    };
+  }, [awaitingReturn]);
 
   const setField = (k: keyof TicketForm) => (e: any) =>
     setF((p) => ({ ...p, [k]: e.target.value }));
@@ -400,7 +482,7 @@ export default function Home() {
   // Reads a screenshot, photo, OR PDF of a paper ticket / portal citation-detail
   // page through the OCR pipeline and auto-fills the full scan field set. The
   // user relays nothing; anything the model can't read stays empty ("not shown").
-  async function handleFile(file: File) {
+  async function handleFile(file: File, opts?: { silent?: boolean }) {
     if (!file) return;
     const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
     if (file.size > 8 * 1024 * 1024) {
@@ -455,18 +537,33 @@ export default function Home() {
         return next;
       });
       setCaptured(true);
-      const got = [x.ticket && "ticket number", x.vdate && "date", x.plate && "plate", x.make && "make", x.body_type && "body type"].filter(Boolean);
-      setUploadMsg({
-        kind: "ok",
-        text: got.length
-          ? `Read your ${got.join(", ")}. We'll check each field in the scan — fix anything that's off.`
-          : "Upload received, but some fields were hard to read. The scan will mark those “not shown.”",
-      });
+      if (!opts?.silent) {
+        const got = [x.ticket && "ticket number", x.vdate && "date", x.plate && "plate", x.make && "make", x.body_type && "body type"].filter(Boolean);
+        setUploadMsg({
+          kind: "ok",
+          text: got.length
+            ? `Read your ${got.join(", ")}. We'll check each field in the scan — fix anything that's off.`
+            : "Upload received, but some fields were hard to read. The scan will mark those “not shown.”",
+        });
+      }
     } catch {
       setUploadMsg({ kind: "err", text: isPdf ? "Couldn't read that PDF. Try a screenshot of the page instead." : "Couldn't read the image automatically. You can still type the details in below." });
     } finally {
       setUploading(false);
     }
+  }
+
+  // Handle one OR several files (Android "2–3 screenshots" fallback). Each runs
+  // through the SAME OCR path; merging is inherent (found values win, empties
+  // never overwrite). A single combined message is shown for a batch.
+  async function handleFiles(files: FileList | File[] | null) {
+    const list = files ? Array.from(files) : [];
+    if (!list.length) return;
+    if (list.length === 1) { await handleFile(list[0]); return; }
+    for (const file of list) {
+      await handleFile(file, { silent: true });
+    }
+    setUploadMsg({ kind: "ok", text: `Read ${list.length} files. We merged everything we could — check the coverage below and the fields in the scan.` });
   }
 
   const copy = () => {
@@ -480,7 +577,7 @@ export default function Home() {
     window.open(`mailto:parkingticketappeal@albanyny.gov?subject=${subject}&body=${body}`, "_blank");
   };
 
-  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkMethod("plate"); setLkPlate(""); setLkState("NY"); setLkCitation(""); setLkVin(""); setAiDesc(""); setAiMatchMsg(null); setPolished(null); setPolishMsg(null); setTriedContinue(false); setLetterMode("situation"); setScanResult(null); setScanSourced(false); setScanValues({}); setPasteText(""); setParseMsg(null); setCaptured(false); clearState(); setHasSaved(false); };
+  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkMethod("plate"); setLkPlate(""); setLkState("NY"); setLkCitation(""); setLkVin(""); setAiDesc(""); setAiMatchMsg(null); setPolished(null); setPolishMsg(null); setTriedContinue(false); setLetterMode("situation"); setScanResult(null); setScanSourced(false); setScanValues({}); setPasteText(""); setParseMsg(null); setCaptured(false); setAwaitingReturn(false); setReturned(false); setCapCopied(false); setCapturePlatform(detectPlatform()); clearState(); setHasSaved(false); };
 
   const inputCls = "w-full rounded-md border border-input bg-secondary/40 px-3 py-2.5 text-sm focus:border-primary focus:bg-background focus:outline-none focus:ring-2 focus:ring-primary/25 transition";
   const labelCls = "block text-sm font-semibold mb-1.5";
@@ -1166,29 +1263,99 @@ export default function Home() {
                     The fastest way: pull your real case record from the City portal and let us read every field. One screenshot — you don't type anything. We only use what's actually shown; we never guess a field.
                   </p>
 
-                  <input ref={sourceFileRef} type="file" accept="image/*,application/pdf" capture="environment" className="hidden"
-                    onChange={(e) => { const file = e.target.files?.[0]; if (file) handleFile(file); }} />
+                  <input ref={sourceFileRef} type="file" accept="image/*,application/pdf" multiple className="hidden"
+                    onChange={(e) => { handleFiles(e.target.files); e.currentTarget.value = ""; }} />
 
-                  {/* PRIMARY: one-tap portal capture */}
+                  {/* Always-visible full-page tip */}
+                  <div className="mb-3 flex items-start gap-2 rounded-lg bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
+                    <Info size={14} className="mt-0.5 shrink-0 text-primary" />
+                    <span><b>Tip:</b> capture the FULL page (not just one screen) so we can read every field. Saving as PDF captures everything.</span>
+                  </div>
+
+                  {/* PRIMARY: one-tap portal capture — guided round-trip */}
                   <div className="rounded-xl border border-primary/40 bg-primary/5 p-4" data-testid="scan-source-portal">
-                    <div className="flex items-center gap-2 text-sm font-semibold">
-                      One-tap portal capture <span className="rounded-full bg-accent/15 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-accent">Recommended</span>
-                    </div>
-                    <ol className="mt-2 space-y-1 text-xs text-muted-foreground">
-                      <li>1. Open your case on the City's official portal and log in{(f.plate || f.ticket) ? <> (search with <b className="text-foreground">{f.ticket ? `ticket ${f.ticket}` : `plate ${f.plate}`}</b>)</> : null}. You clear the human-verification check — we never touch it.</li>
-                      <li>2. Take ONE screenshot of the citation-detail page (or save it as PDF).</li>
-                      <li>3. Upload it here — we read every field automatically.</li>
-                    </ol>
-                    <div className="mt-3 flex flex-wrap gap-3">
-                      <a href={LOOKUP_PORTAL.parkingUrl} target="_blank" rel="noopener noreferrer" data-testid="scan-source-portal-link"
-                        className="inline-flex items-center gap-2 rounded-md border border-border bg-background px-4 py-2 text-sm font-semibold hover-elevate">
-                        <ExternalLink size={15} /> Open the City portal
-                      </a>
-                      <button onClick={() => sourceFileRef.current?.click()} disabled={uploading} data-testid="scan-source-screenshot"
-                        className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover-elevate disabled:opacity-50">
-                        {uploading ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />} Upload screenshot / PDF
-                      </button>
-                    </div>
+                    {!awaitingReturn ? (
+                      <>
+                        <div className="flex items-center gap-2 text-sm font-semibold">
+                          One-tap portal capture <span className="rounded-full bg-accent/15 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-accent">Recommended</span>
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          We open the City's official portal in a new tab. You log in and clear the human-verification check — the app never logs in for you or reads the portal itself. Then capture your page and come back.
+                        </p>
+
+                        {portalSearchValue && (
+                          <div className="mt-3 rounded-lg border border-border bg-background px-3 py-2 text-xs">
+                            <div className="font-semibold uppercase tracking-wide text-muted-foreground">Search the portal with</div>
+                            <div className="mt-1 flex items-center gap-2">
+                              <code className="font-mono text-sm font-bold tracking-widest">{portalSearchValue.toUpperCase()}</code>
+                              {capCopied && <span className="inline-flex items-center gap-1 font-semibold text-accent" data-testid="text-copied-plate"><Check size={13} /> Copied</span>}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Platform-aware capture instructions */}
+                        <div className="mt-3" data-testid="instructions-mobile-capture">
+                          <div className="flex flex-wrap gap-2">
+                            {(["ios", "android", "desktop"] as CapturePlatform[]).map((pf) => {
+                              const on = capturePlatform === pf;
+                              const Icon = pf === "desktop" ? Monitor : Smartphone;
+                              return (
+                                <button key={pf} onClick={() => setCapturePlatform(pf)} data-testid={`toggle-platform-${pf}`}
+                                  className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-semibold transition hover-elevate ${on ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border bg-secondary/30"}`}>
+                                  <Icon size={13} /> {CAPTURE_STEPS[pf].label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <Accordion type="single" collapsible className="mt-2">
+                            <AccordionItem value="how" className="border-b-0">
+                              <AccordionTrigger className="py-2 text-xs font-semibold">Show me how to capture the full page</AccordionTrigger>
+                              <AccordionContent>
+                                <ol className="list-decimal space-y-1.5 pl-5 text-xs text-muted-foreground">
+                                  {CAPTURE_STEPS[capturePlatform].steps.map((s, i) => <li key={i}>{s}</li>)}
+                                </ol>
+                              </AccordionContent>
+                            </AccordionItem>
+                          </Accordion>
+                        </div>
+
+                        <div className="mt-3 flex flex-wrap gap-3">
+                          <a href={LOOKUP_PORTAL.parkingUrl} target="_blank" rel="noopener noreferrer" onClick={onOpenPortal} data-testid="button-open-portal"
+                            className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover-elevate">
+                            <ExternalLink size={15} /> Open my ticket on the City portal
+                          </a>
+                          <button onClick={() => sourceFileRef.current?.click()} disabled={uploading} data-testid="scan-source-quickupload"
+                            className="inline-flex items-center gap-2 rounded-md border border-border bg-background px-4 py-2 text-sm font-semibold hover-elevate disabled:opacity-50">
+                            {uploading ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />} Already captured it? Upload now
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <div ref={uploadPanelRef} data-testid="state-awaiting-return">
+                        <div className="flex items-center gap-2 text-sm font-semibold">
+                          {returned
+                            ? <><CheckCircle2 size={16} className="text-accent" /> You're back — upload what you captured</>
+                            : <><Loader2 size={16} className="animate-spin text-primary" /> Waiting for you to come back…</>}
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          In the portal: log in → open your ticket → take a full-page screenshot or Save as PDF → come back here. We never log in for you or read the portal itself; you clear the CAPTCHA.
+                        </p>
+                        <div className="mt-3 flex flex-wrap gap-3">
+                          <button onClick={() => sourceFileRef.current?.click()} disabled={uploading} data-testid="scan-source-screenshot"
+                            className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover-elevate disabled:opacity-50">
+                            {uploading ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />} Upload screenshot / PDF
+                          </button>
+                          <button onClick={() => { setReturned(true); sourceFileRef.current?.click(); }} disabled={uploading} data-testid="button-im-back-upload"
+                            className="inline-flex items-center gap-2 rounded-md border border-border bg-background px-4 py-2 text-sm font-semibold hover-elevate disabled:opacity-50">
+                            I'm back — upload now
+                          </button>
+                          <a href={LOOKUP_PORTAL.parkingUrl} target="_blank" rel="noopener noreferrer" onClick={onOpenPortal}
+                            className="inline-flex items-center gap-2 rounded-md border border-border bg-background px-4 py-2 text-sm font-semibold hover-elevate">
+                            <ExternalLink size={15} /> Reopen portal
+                          </a>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* SECONDARY: paper ticket photo */}
