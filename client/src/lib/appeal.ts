@@ -607,6 +607,73 @@ ${f.address || "[YOUR MAILING ADDRESS]"}
 ${f.email || "[YOUR EMAIL]"}${f.phone ? `\n${f.phone}` : ""}`;
 }
 
+// ============================================================================
+// CAMERA-TICKET STATEMENT (RLC / SZS) — raised at the PVB pre-trial conference
+// ----------------------------------------------------------------------------
+// Camera tickets are civil owner-liability and a DIFFERENT framework from
+// parking. Authorities come from VERIFIED-CAMERA-DEFENSE-LAW.md. This builder
+// only assembles grounds the user confirmed; for demand-proof items it generates
+// language putting the City to its burden (logs / certificates / images).
+// ============================================================================
+
+// Neutral shape (mirrors cameraDefense.CameraLetterGround) to avoid a cycle.
+export type CameraStatementGround = {
+  label: string;
+  citation: string;
+  why: string;
+  requiresProof: boolean;
+  requiresCityProof: boolean;
+};
+
+export function buildCameraLetter(
+  f: TicketForm,
+  grounds: CameraStatementGround[],
+  program: "szs" | "rlc"
+): string {
+  const today = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  const progName = program === "szs" ? "school-zone speed camera" : "red-light camera";
+  const vehLine = [
+    f.plate && `License plate: ${f.plate}${f.state ? ` (${f.state})` : ""}`,
+    (f.make || f.model) && `Vehicle: ${[f.make, f.model].filter(Boolean).join(" ")}`,
+  ].filter(Boolean).join("\n");
+
+  const groundLines = grounds.length
+    ? grounds.map((g, i) => {
+        const ask = g.requiresCityProof
+          ? " I demand that the City produce the records establishing this element; the burden is the City's."
+          : g.requiresProof
+          ? " I am prepared to provide supporting documentation of this."
+          : "";
+        return `  ${i + 1}. ${g.label} (${g.citation}). ${g.why}${ask}`;
+      }).join("\n\n")
+    : "  1. I contest liability and put the City to its proof on every required element of the charge.";
+
+  return `${today}
+
+City of Albany Parking Violations Bureau
+24 Eagle Street, Room 203
+Albany, NY 12207
+(Pre-trial conference requested via viewcitation.com / 1-855-427-0455)
+
+RE: Contest of ${progName} Notice of Liability No. ${f.ticket || "[CITATION NUMBER]"}
+Date of violation: ${f.vdate ? fmtDate(f.vdate) : "[DATE]"}${f.location ? `\nLocation: ${f.location}` : ""}
+
+To the Parking Violations Bureau:
+
+I am the registered owner identified on the above ${progName} notice of liability, and I contest it. I do not admit liability and request a pre-trial conference. I understand this is a civil owner-liability matter; I raise the following ground(s):
+
+${vehLine ? vehLine + "\n\n" : ""}${groundLines}
+
+The sworn technician certificate is only prima facie evidence and may be rebutted; I request to inspect the photographs and/or video, which must be made available in this proceeding. I ask that this notice of liability be dismissed. Please advise me of the conference date and time.
+
+Thank you for your time and consideration.
+
+Sincerely,
+${f.name || "[YOUR NAME]"}
+${f.address || "[YOUR MAILING ADDRESS]"}
+${f.email || "[YOUR EMAIL]"}${f.phone ? `\n${f.phone}` : ""}`;
+}
+
 /* ============================================================
    FOIL DENIAL APPEAL (Public Officers Law § 89(4)(a))
    When the City denies a FOIL request, ignores it past the

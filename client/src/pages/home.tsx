@@ -21,6 +21,7 @@ import {
   LOOKUP_STATES, LOOKUP_PORTAL, resolveLookupState,
 } from "@/lib/appeal";
 import TicketScan from "@/components/ticket-scan";
+import CameraDefense from "@/components/camera-defense";
 import { toLetterGrounds, parseCitationText, captureCoverage, type ScanResult, type ScanField } from "@/lib/ticketScan";
 
 const ICONS: Record<string, any> = {
@@ -1238,21 +1239,7 @@ export default function Home() {
           {step === STEP.SCAN && (
             <div data-testid="step-scan">
               {f.isCamera ? (
-                <div data-testid="scan-camera-skip">
-                  <div className="mb-1 flex items-center gap-2">
-                    <span className="grid h-9 w-9 place-items-center rounded-md bg-primary/10 text-primary"><Camera size={20} /></span>
-                    <h2 className="text-xl font-semibold">Camera tickets skip the scan</h2>
-                  </div>
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    This is a red-light or school-zone speed camera ticket. Those run under a different law (VTL § 1111-a / § 1180-f) and the parking-ticket field scan does not apply.
-                    Review the video and appeal at <a className="text-primary underline decoration-dotted" href="https://www.viewcitation.com" target="_blank" rel="noopener noreferrer">viewcitation.com</a> or by phone at 1-855-427-0455.
-                  </p>
-                  <div className="mt-6 flex items-center justify-between">
-                    <button onClick={() => setStep(STEP.SITUATION)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
-                    <button onClick={() => onScanProceed("situation")} data-testid="scan-camera-continue"
-                      className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">Continue to a written statement →</button>
-                  </div>
-                </div>
+                <CameraDefense form={f} onBack={() => setStep(STEP.SITUATION)} onPrint={printLetter} />
               ) : !scanSourced ? (
                 <div data-testid="scan-source">
                   <div className="mb-1 flex items-center gap-2">
