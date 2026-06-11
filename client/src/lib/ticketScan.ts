@@ -331,6 +331,60 @@ export function parseCitationText(text: string): ParsedCitation {
   return { form, scanValues };
 }
 
+// ============================================================================
+// CAPTURE COVERAGE — what a portal screenshot did / didn't include
+// ----------------------------------------------------------------------------
+// After OCR reads an uploaded screenshot/PDF, we report which citation fields
+// came through and which are missing, so the user can retake a fuller capture.
+// "core" fields should appear on essentially any citation-detail page; the rest
+// may be lower on the page or simply not applicable to the charge.
+// ============================================================================
+
+export type CoverageField = {
+  id: string;
+  label: string;
+  core: boolean;
+  formField?: keyof TicketForm; // where the value lives (else scanValues[id])
+};
+
+export const COVERAGE_FIELDS: CoverageField[] = [
+  { id: "ticket", label: "Citation / ticket number", core: true, formField: "ticket" },
+  { id: "plate", label: "License plate", core: true, formField: "plate" },
+  { id: "state", label: "State of registration", core: true, formField: "state" },
+  { id: "date", label: "Date of violation", core: true, formField: "vdate" },
+  { id: "time", label: "Time of violation", core: true, formField: "vtime" },
+  { id: "place", label: "Place / location", core: true, formField: "location" },
+  { id: "violationCode", label: "Violation code + description", core: true, formField: "violation" },
+  { id: "make", label: "Vehicle make", core: true, formField: "make" },
+  { id: "bodyType", label: "Body type", core: false },
+  { id: "plateType", label: "Plate type", core: false },
+  { id: "regExpiration", label: "Registration expiration", core: false },
+  { id: "meterNumber", label: "Meter number", core: false },
+  { id: "officerId", label: "Officer / issuer ID", core: false },
+  { id: "daysHours", label: "Days / hours in effect", core: false },
+];
+
+export type Coverage = {
+  present: CoverageField[];
+  missingCore: CoverageField[];
+  missingOther: CoverageField[];
+};
+
+export function captureCoverage(
+  form: Partial<TicketForm>,
+  scanValues: Record<string, string>
+): Coverage {
+  const val = (cf: CoverageField): string =>
+    (cf.formField ? String(form[cf.formField] ?? "") : scanValues[cf.id] ?? "").trim();
+  const present = COVERAGE_FIELDS.filter((cf) => val(cf));
+  const missing = COVERAGE_FIELDS.filter((cf) => !val(cf));
+  return {
+    present,
+    missingCore: missing.filter((m) => m.core),
+    missingOther: missing.filter((m) => !m.core),
+  };
+}
+
 // Map confirmed scan grounds into the letter generator's neutral shape.
 // Tier-1 leads; Tier-2 follows. Tier-3 is never included.
 export function toLetterGrounds(result: ScanResult): LetterGround[] {

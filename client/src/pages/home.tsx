@@ -20,7 +20,7 @@ import {
   LOOKUP_STATES, LOOKUP_PORTAL, resolveLookupState,
 } from "@/lib/appeal";
 import TicketScan from "@/components/ticket-scan";
-import { toLetterGrounds, parseCitationText, type ScanResult, type ScanField } from "@/lib/ticketScan";
+import { toLetterGrounds, parseCitationText, captureCoverage, type ScanResult, type ScanField } from "@/lib/ticketScan";
 
 const ICONS: Record<string, any> = {
   Receipt, Car, Signpost, ParkingMeter, FileText, TriangleAlert, HeartPulse, MessageSquare,
@@ -157,6 +157,10 @@ export default function Home() {
   const [scanValues, setScanValues] = useState<Record<string, string>>({});
   const [pasteText, setPasteText] = useState("");
   const [parseMsg, setParseMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  // Set after a successful screenshot/PDF capture so we can show a coverage
+  // report (what the capture included / missed + how to retake).
+  const [captured, setCaptured] = useState(false);
+  const coverage = useMemo(() => captureCoverage(f, scanValues), [f, scanValues]);
 
   const setField = (k: keyof TicketForm) => (e: any) =>
     setF((p) => ({ ...p, [k]: e.target.value }));
@@ -448,6 +452,7 @@ export default function Home() {
         put("daysHours", x.days_hours);
         return next;
       });
+      setCaptured(true);
       const got = [x.ticket && "ticket number", x.vdate && "date", x.plate && "plate", x.make && "make", x.body_type && "body type"].filter(Boolean);
       setUploadMsg({
         kind: "ok",
@@ -473,7 +478,7 @@ export default function Home() {
     window.open(`mailto:parkingticketappeal@albanyny.gov?subject=${subject}&body=${body}`, "_blank");
   };
 
-  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkMethod("plate"); setLkPlate(""); setLkState("NY"); setLkCitation(""); setLkVin(""); setAiDesc(""); setAiMatchMsg(null); setPolished(null); setPolishMsg(null); setTriedContinue(false); setLetterMode("situation"); setScanResult(null); setScanSourced(false); setScanValues({}); setPasteText(""); setParseMsg(null); clearState(); setHasSaved(false); };
+  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkMethod("plate"); setLkPlate(""); setLkState("NY"); setLkCitation(""); setLkVin(""); setAiDesc(""); setAiMatchMsg(null); setPolished(null); setPolishMsg(null); setTriedContinue(false); setLetterMode("situation"); setScanResult(null); setScanSourced(false); setScanValues({}); setPasteText(""); setParseMsg(null); setCaptured(false); clearState(); setHasSaved(false); };
 
   const inputCls = "w-full rounded-md border border-input bg-secondary/40 px-3 py-2.5 text-sm focus:border-primary focus:bg-background focus:outline-none focus:ring-2 focus:ring-primary/25 transition";
   const labelCls = "block text-sm font-semibold mb-1.5";
@@ -1220,11 +1225,50 @@ export default function Home() {
                     </div>
                   )}
 
+                  {/* Capture coverage — what the screenshot included / missed */}
+                  {captured && (
+                    <div className="mt-4 rounded-xl border border-border bg-background/60 p-4" data-testid="scan-coverage">
+                      <div className="mb-2 text-sm font-semibold">What we read from your capture</div>
+                      {coverage.present.length > 0 && (
+                        <p className="flex items-start gap-2 text-xs text-accent" data-testid="coverage-present">
+                          <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+                          <span>Captured: {coverage.present.map((c) => c.label).join(", ")}.</span>
+                        </p>
+                      )}
+
+                      {coverage.missingCore.length > 0 ? (
+                        <div className="mt-3 rounded-lg bg-destructive/10 px-3 py-2.5 text-xs text-destructive" data-testid="coverage-missing-core">
+                          <p className="flex items-start gap-2 font-semibold"><TriangleAlert size={14} className="mt-0.5 shrink-0" /> Your screenshot left out: {coverage.missingCore.map((c) => c.label).join(", ")}.</p>
+                          <p className="mt-1.5 text-destructive/90">
+                            How to retake: capture the <b>entire</b> citation-detail page in one shot. Expand every section first, scroll so the vehicle details and the violation/officer rows are visible, then screenshot again — or save the page as a PDF and upload that. On a phone, use a “full page” / scrolling screenshot.
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="mt-2 flex items-start gap-2 text-xs text-accent" data-testid="coverage-core-ok">
+                          <CheckCircle2 size={14} className="mt-0.5 shrink-0" /> Looks complete — every core field came through.
+                        </p>
+                      )}
+
+                      {coverage.missingOther.length > 0 && (
+                        <p className="mt-2 text-xs text-muted-foreground" data-testid="coverage-missing-other">
+                          Also not detected (these may be lower on the page or may not apply to your charge): {coverage.missingOther.map((c) => c.label).join(", ")}. The scan marks these “not shown” so you can confirm them or make the City produce them — we never guess.
+                        </p>
+                      )}
+
+                      <div className="mt-3 flex flex-wrap gap-3">
+                        <button onClick={() => sourceFileRef.current?.click()} disabled={uploading} data-testid="coverage-retake"
+                          className="inline-flex items-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-semibold hover-elevate disabled:opacity-50">
+                          {uploading ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />} Retake / upload again
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="mt-6 flex items-center justify-between">
                     <button onClick={() => setStep(STEP.SITUATION)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
                     <button onClick={() => { setScanSourced(true); window.scrollTo({ top: 0, behavior: "smooth" }); }} data-testid="scan-source-continue"
                       className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">
-                      Continue to the scan <ArrowRight size={16} />
+                      {captured && coverage.missingCore.length > 0 ? "Continue anyway" : "Continue to the scan"} <ArrowRight size={16} />
                     </button>
                   </div>
                   <p className="mt-3 text-xs text-muted-foreground">No ticket and the deadline is close? Continue anyway — the scan will help you file on time and make the City produce the record.</p>
