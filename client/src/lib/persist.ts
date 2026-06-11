@@ -18,6 +18,9 @@ export type PersistedState = {
   f: unknown;
   foil: unknown;
   fap: unknown;
+  // Optional (added after v1; older blobs simply lack them and default cleanly).
+  scanValues?: Record<string, string>;
+  scanSourced?: boolean;
 };
 
 export function storageAvailable(): boolean {

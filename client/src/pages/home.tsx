@@ -153,8 +153,8 @@ export default function Home() {
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   // User-assisted sourcing gate before the scan, plus values for scan-only
   // fields (plate type, body type, etc.) the user pulled/typed.
-  const [scanSourced, setScanSourced] = useState(false);
-  const [scanValues, setScanValues] = useState<Record<string, string>>({});
+  const [scanSourced, setScanSourced] = useState(restored?.scanSourced ?? false);
+  const [scanValues, setScanValues] = useState<Record<string, string>>(restored?.scanValues ?? {});
   const [pasteText, setPasteText] = useState("");
   const [parseMsg, setParseMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   // Set after a successful screenshot/PDF capture so we can show a coverage
@@ -197,6 +197,7 @@ export default function Home() {
 
   // Parse pasted citation-detail text on-device (never fetch the portal).
   const parsePastedCitation = () => {
+    setUploadMsg(null);
     const { form, scanValues: sv } = parseCitationText(pasteText);
     const formKeys = Object.keys(form);
     const svKeys = Object.keys(sv);
@@ -215,9 +216,9 @@ export default function Home() {
   // "Start over" control can appear.
   useEffect(() => {
     if (!canPersist) return;
-    saveState({ step, sit, f, foil, fap });
+    saveState({ step, sit, f, foil, fap, scanValues, scanSourced });
     setHasSaved(true);
-  }, [canPersist, step, sit, f, foil, fap]);
+  }, [canPersist, step, sit, f, foil, fap, scanValues, scanSourced]);
 
   // Smooth-scroll to and focus the first ticket field (hero CTA).
   const focusTicket = () => {
@@ -408,6 +409,7 @@ export default function Home() {
     }
     setUploading(true);
     setUploadMsg(null);
+    setParseMsg(null);
     try {
       let dataUrl: string;
       if (isPdf) {

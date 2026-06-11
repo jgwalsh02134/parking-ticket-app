@@ -113,23 +113,18 @@ export default function TicketScan({ form, scanValues, daysLeft, deadlineDays, o
         <h3 className="mt-5 text-lg font-semibold">{field.label}</h3>
         <p className="mt-1 text-sm text-muted-foreground">{field.why}</p>
 
-        <div className="mt-4 rounded-lg border border-border bg-secondary/30 px-4 py-3 text-sm">
-          <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">On your record it says</span>
-          {printed ? (
-            <div className="mt-1 font-mono font-semibold" data-testid="scan-printed-value">{printed}</div>
-          ) : (
-            <div className="mt-1" data-testid="scan-printed-value">
-              <span className="text-muted-foreground">Not shown on the record you pulled.</span>
-              <input
-                className="mt-2 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                value=""
-                onChange={(e) => onProvideValue(field, e.target.value)}
-                placeholder={`If you know the ${field.label.toLowerCase()}, type it here (optional)`}
-                data-testid="scan-provide-value"
-              />
-              <p className="mt-1 text-xs text-muted-foreground">Leave blank to make the City produce it — don't guess.</p>
-            </div>
-          )}
+        <div className="mt-4 rounded-lg border border-border bg-secondary/30 px-4 py-3 text-sm" data-testid="scan-printed-value">
+          <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            {printed ? "On your record it says (edit if it's wrong)" : "Not shown on the record — type it if you know it"}
+          </label>
+          <input
+            className="mt-2 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm"
+            value={printed}
+            onChange={(e) => onProvideValue(field, e.target.value)}
+            placeholder={`Type the ${field.label.toLowerCase()} if you know it`}
+            data-testid="scan-provide-value"
+          />
+          {!printed && <p className="mt-1 text-xs text-muted-foreground">Leave blank to make the City produce it — don't guess.</p>}
         </div>
 
         <div className="mt-4 text-sm font-semibold">Is this correct on your ticket?</div>
