@@ -20,7 +20,7 @@ import {
   LOOKUP_STATES, LOOKUP_PORTAL, resolveLookupState,
 } from "@/lib/appeal";
 import TicketScan from "@/components/ticket-scan";
-import { toLetterGrounds, type ScanResult } from "@/lib/ticketScan";
+import { toLetterGrounds, parseCitationText, type ScanResult, type ScanField } from "@/lib/ticketScan";
 
 const ICONS: Record<string, any> = {
   Receipt, Car, Signpost, ParkingMeter, FileText, TriangleAlert, HeartPulse, MessageSquare,
@@ -106,6 +106,8 @@ export default function Home() {
   const [triedContinue, setTriedContinue] = useState(false);
   // Hero CTA target — smooth-scroll/focus the first required field.
   const ticketRef = useRef<HTMLInputElement>(null);
+  // Screenshot/photo upload trigger inside the scan sourcing panel.
+  const sourceFileRef = useRef<HTMLInputElement>(null);
 
   // FOIL feature state
   const [foilMode, setFoilMode] = useState(false);
@@ -149,6 +151,12 @@ export default function Home() {
   // builder the Appeal step uses; scanResult holds the confirmed grounds.
   const [letterMode, setLetterMode] = useState<LetterMode>("situation");
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  // User-assisted sourcing gate before the scan, plus values for scan-only
+  // fields (plate type, body type, etc.) the user pulled/typed.
+  const [scanSourced, setScanSourced] = useState(false);
+  const [scanValues, setScanValues] = useState<Record<string, string>>({});
+  const [pasteText, setPasteText] = useState("");
+  const [parseMsg, setParseMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
   const setField = (k: keyof TicketForm) => (e: any) =>
     setF((p) => ({ ...p, [k]: e.target.value }));
@@ -174,6 +182,27 @@ export default function Home() {
     setLetterMode(mode);
     setStep(STEP.DEFENSE);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  // A scan field the user supplies from their own knowledge writes to the real
+  // form (for fields that have a slot) or to scanValues (scan-only fields).
+  const onProvideScanValue = (field: ScanField, value: string) => {
+    if (field.formField) setF((p) => ({ ...p, [field.formField as keyof TicketForm]: value }));
+    else setScanValues((p) => ({ ...p, [field.id]: value }));
+  };
+
+  // Parse pasted citation-detail text on-device (never fetch the portal).
+  const parsePastedCitation = () => {
+    const { form, scanValues: sv } = parseCitationText(pasteText);
+    const formKeys = Object.keys(form);
+    const svKeys = Object.keys(sv);
+    if (!formKeys.length && !svKeys.length) {
+      setParseMsg({ kind: "err", text: "Couldn't recognize any fields. Make sure you pasted the citation detail (with labels like Plate, Make, Date), or use the screenshot option." });
+      return;
+    }
+    setF((p) => ({ ...p, ...form }));
+    setScanValues((p) => ({ ...p, ...sv }));
+    setParseMsg({ kind: "ok", text: `Captured ${formKeys.length + svKeys.length} field${formKeys.length + svKeys.length === 1 ? "" : "s"}. Anything not shown will be left blank — we never guess.` });
   };
   const foilLetter = useMemo(() => buildFoilLetter(f, sit || "", foil), [f, sit, foil]);
 
@@ -354,50 +383,83 @@ export default function Home() {
     }
   }
 
+  function readAsDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result as string);
+      r.onerror = () => reject(r.error);
+      r.readAsDataURL(file);
+    });
+  }
+
+  // Reads a screenshot, photo, OR PDF of a paper ticket / portal citation-detail
+  // page through the OCR pipeline and auto-fills the full scan field set. The
+  // user relays nothing; anything the model can't read stays empty ("not shown").
   async function handleFile(file: File) {
     if (!file) return;
-    if (file.size > 10 * 1024 * 1024) {
-      setUploadMsg({ kind: "err", text: "Image is too large (max 10MB). Try a smaller photo." });
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+    if (file.size > 8 * 1024 * 1024) {
+      setUploadMsg({ kind: "err", text: "File is too large (max 8MB). Try a smaller photo or screenshot." });
       return;
     }
     setUploading(true);
     setUploadMsg(null);
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const dataUrl = reader.result as string;
-      setPreview(dataUrl);
-      try {
-        const res = await apiRequest("POST", "/api/extract-ticket", { image: dataUrl });
-        const json = await res.json();
-        const x = json.fields || {};
-        setF((p) => ({
-          ...p,
-          ticket: x.ticket || p.ticket,
-          vdate: x.vdate || p.vdate,
-          vtime: x.vtime || p.vtime,
-          location: x.location || p.location,
-          plate: x.plate || p.plate,
-          state: x.state || p.state,
-          make: x.make || p.make,
-          model: x.model || p.model,
-          violation: x.violation || p.violation,
-          amount: x.amount || p.amount,
-          isCamera: typeof x.is_camera === "boolean" ? x.is_camera : p.isCamera,
-        }));
-        const got = [x.ticket && "ticket number", x.vdate && "date", x.plate && "plate"].filter(Boolean);
-        setUploadMsg({
-          kind: "ok",
-          text: got.length
-            ? `Read your ${got.join(", ")}. Check the fields below and fix anything that's off.`
-            : "Photo received, but some fields were hard to read. Please fill them in below.",
-        });
-      } catch {
-        setUploadMsg({ kind: "err", text: "Couldn't read the image automatically. You can still type the details in below." });
-      } finally {
-        setUploading(false);
+    try {
+      let dataUrl: string;
+      if (isPdf) {
+        const { pdfFirstPageToImage } = await import("@/lib/pdf");
+        dataUrl = await pdfFirstPageToImage(file);
+      } else {
+        dataUrl = await readAsDataUrl(file);
       }
-    };
-    reader.readAsDataURL(file);
+      setPreview(dataUrl);
+      const res = await apiRequestRaw("POST", "/api/extract-ticket", { image: dataUrl });
+      let json: any = null;
+      try { json = await res.json(); } catch { json = null; }
+      if (json?.unavailable) {
+        setUploadMsg({ kind: "err", text: json.message || "Photo reading isn't set up on this server. Enter the details by hand." });
+        return;
+      }
+      const x = (json && json.fields) || {};
+      setF((p) => ({
+        ...p,
+        ticket: x.ticket || p.ticket,
+        vdate: x.vdate || p.vdate,
+        vtime: x.vtime || p.vtime,
+        location: x.location || p.location,
+        plate: x.plate || p.plate,
+        state: x.state || p.state,
+        make: x.make || p.make,
+        model: x.model || p.model,
+        violation: x.violation || p.violation,
+        amount: x.amount || p.amount,
+        isCamera: typeof x.is_camera === "boolean" ? x.is_camera : p.isCamera,
+      }));
+      // Scan-only fields (no slot in the form) → scanValues, so one capture
+      // auto-fills the whole dismissal scan. Only keep non-empty values.
+      setScanValues((p) => {
+        const next = { ...p };
+        const put = (k: string, v: any) => { if (typeof v === "string" && v.trim()) next[k] = v.trim(); };
+        put("plateType", x.plate_type);
+        put("regExpiration", x.reg_expiration);
+        put("bodyType", x.body_type);
+        put("meterNumber", x.meter_number);
+        put("officerId", x.officer_id);
+        put("daysHours", x.days_hours);
+        return next;
+      });
+      const got = [x.ticket && "ticket number", x.vdate && "date", x.plate && "plate", x.make && "make", x.body_type && "body type"].filter(Boolean);
+      setUploadMsg({
+        kind: "ok",
+        text: got.length
+          ? `Read your ${got.join(", ")}. We'll check each field in the scan — fix anything that's off.`
+          : "Upload received, but some fields were hard to read. The scan will mark those “not shown.”",
+      });
+    } catch {
+      setUploadMsg({ kind: "err", text: isPdf ? "Couldn't read that PDF. Try a screenshot of the page instead." : "Couldn't read the image automatically. You can still type the details in below." });
+    } finally {
+      setUploading(false);
+    }
   }
 
   const copy = () => {
@@ -411,7 +473,7 @@ export default function Home() {
     window.open(`mailto:parkingticketappeal@albanyny.gov?subject=${subject}&body=${body}`, "_blank");
   };
 
-  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkMethod("plate"); setLkPlate(""); setLkState("NY"); setLkCitation(""); setLkVin(""); setAiDesc(""); setAiMatchMsg(null); setPolished(null); setPolishMsg(null); setTriedContinue(false); setLetterMode("situation"); setScanResult(null); clearState(); setHasSaved(false); };
+  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkMethod("plate"); setLkPlate(""); setLkState("NY"); setLkCitation(""); setLkVin(""); setAiDesc(""); setAiMatchMsg(null); setPolished(null); setPolishMsg(null); setTriedContinue(false); setLetterMode("situation"); setScanResult(null); setScanSourced(false); setScanValues({}); setPasteText(""); setParseMsg(null); clearState(); setHasSaved(false); };
 
   const inputCls = "w-full rounded-md border border-input bg-secondary/40 px-3 py-2.5 text-sm focus:border-primary focus:bg-background focus:outline-none focus:ring-2 focus:ring-primary/25 transition";
   const labelCls = "block text-sm font-semibold mb-1.5";
@@ -922,7 +984,7 @@ export default function Home() {
                 onDrop={(e) => { e.preventDefault(); const file = e.dataTransfer.files?.[0]; if (file) handleFile(file); }}
                 className="mb-6 cursor-pointer rounded-xl border-2 border-dashed border-border bg-secondary/30 p-6 text-center transition hover:border-primary hover:bg-secondary/50"
               >
-                <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden"
+                <input ref={fileRef} type="file" accept="image/*,application/pdf" capture="environment" className="hidden"
                   onChange={(e) => { const file = e.target.files?.[0]; if (file) handleFile(file); }} />
                 {uploading ? (
                   <div className="flex items-center justify-center gap-3 text-sm text-muted-foreground">
@@ -937,7 +999,7 @@ export default function Home() {
                   <div className="flex flex-col items-center gap-2">
                     <span className="grid h-12 w-12 place-items-center rounded-full bg-primary/10 text-primary"><Upload size={22} /></span>
                     <span className="text-sm font-semibold">Upload or photograph your ticket</span>
-                    <span className="text-xs text-muted-foreground">JPG or PNG, up to 10MB · we'll auto-fill the fields</span>
+                    <span className="text-xs text-muted-foreground">JPG, PNG, or PDF, up to 8MB · we'll auto-fill the fields</span>
                   </div>
                 )}
               </div>
@@ -1087,13 +1149,95 @@ export default function Home() {
                       className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">Continue to a written statement →</button>
                   </div>
                 </div>
+              ) : !scanSourced ? (
+                <div data-testid="scan-source">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="grid h-9 w-9 place-items-center rounded-md bg-primary/10 text-primary"><FileSearch size={20} /></span>
+                    <h2 className="text-xl font-semibold">Get your ticket details</h2>
+                  </div>
+                  <p className="mb-5 text-sm text-muted-foreground">
+                    The fastest way: pull your real case record from the City portal and let us read every field. One screenshot — you don't type anything. We only use what's actually shown; we never guess a field.
+                  </p>
+
+                  <input ref={sourceFileRef} type="file" accept="image/*,application/pdf" capture="environment" className="hidden"
+                    onChange={(e) => { const file = e.target.files?.[0]; if (file) handleFile(file); }} />
+
+                  {/* PRIMARY: one-tap portal capture */}
+                  <div className="rounded-xl border border-primary/40 bg-primary/5 p-4" data-testid="scan-source-portal">
+                    <div className="flex items-center gap-2 text-sm font-semibold">
+                      One-tap portal capture <span className="rounded-full bg-accent/15 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-accent">Recommended</span>
+                    </div>
+                    <ol className="mt-2 space-y-1 text-xs text-muted-foreground">
+                      <li>1. Open your case on the City's official portal and log in{(f.plate || f.ticket) ? <> (search with <b className="text-foreground">{f.ticket ? `ticket ${f.ticket}` : `plate ${f.plate}`}</b>)</> : null}. You clear the human-verification check — we never touch it.</li>
+                      <li>2. Take ONE screenshot of the citation-detail page (or save it as PDF).</li>
+                      <li>3. Upload it here — we read every field automatically.</li>
+                    </ol>
+                    <div className="mt-3 flex flex-wrap gap-3">
+                      <a href={LOOKUP_PORTAL.parkingUrl} target="_blank" rel="noopener noreferrer" data-testid="scan-source-portal-link"
+                        className="inline-flex items-center gap-2 rounded-md border border-border bg-background px-4 py-2 text-sm font-semibold hover-elevate">
+                        <ExternalLink size={15} /> Open the City portal
+                      </a>
+                      <button onClick={() => sourceFileRef.current?.click()} disabled={uploading} data-testid="scan-source-screenshot"
+                        className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover-elevate disabled:opacity-50">
+                        {uploading ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />} Upload screenshot / PDF
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* SECONDARY: paper ticket photo */}
+                  <div className="mt-4 rounded-xl border border-border bg-secondary/30 p-4">
+                    <div className="text-sm font-semibold">Or: I have the paper ticket</div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {(preview || f.ticket || f.plate)
+                        ? "We already have details from your photo / what you typed — you can scan now."
+                        : "Snap or upload a photo of the paper citation and we'll read every field."}
+                    </p>
+                    <div className="mt-3">
+                      <button onClick={() => sourceFileRef.current?.click()} disabled={uploading} data-testid="scan-source-upload"
+                        className="inline-flex items-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-semibold hover-elevate disabled:opacity-50">
+                        {uploading ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />} Upload a photo
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* FALLBACK: paste text */}
+                  <div className="mt-4 rounded-xl border border-border bg-secondary/30 p-4">
+                    <div className="text-sm font-semibold">Or: paste the citation details as text</div>
+                    <p className="mt-1 text-xs text-muted-foreground">If you can't upload an image, paste the text from the portal page and we'll parse it.</p>
+                    <textarea className={`${inputCls} mt-2 min-h-24 resize-y`} value={pasteText}
+                      onChange={(e) => setPasteText(e.target.value)} data-testid="scan-source-paste"
+                      placeholder={"Paste the citation-detail text here, e.g.\nPlate: ABC1234\nState: NY\nMake: Honda\nViolation: Expired meter\nDate: 06/01/2026"} />
+                    <button onClick={parsePastedCitation} disabled={pasteText.trim().length < 4} data-testid="scan-source-parse"
+                      className="mt-2 inline-flex items-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-semibold hover-elevate disabled:opacity-40 disabled:cursor-not-allowed">
+                      <FileSearch size={15} /> Read these details
+                    </button>
+                  </div>
+
+                  {(uploadMsg || parseMsg) && (
+                    <div className={`mt-4 flex items-start gap-2 rounded-lg px-3 py-2.5 text-sm ${(parseMsg || uploadMsg)!.kind === "ok" ? "bg-accent/12 text-accent" : "bg-destructive/12 text-destructive"}`} data-testid="scan-source-msg">
+                      {(parseMsg || uploadMsg)!.kind === "ok" ? <CheckCircle2 size={16} className="mt-0.5 shrink-0" /> : <Info size={16} className="mt-0.5 shrink-0" />}
+                      <div>{(parseMsg || uploadMsg)!.text}</div>
+                    </div>
+                  )}
+
+                  <div className="mt-6 flex items-center justify-between">
+                    <button onClick={() => setStep(STEP.SITUATION)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
+                    <button onClick={() => { setScanSourced(true); window.scrollTo({ top: 0, behavior: "smooth" }); }} data-testid="scan-source-continue"
+                      className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">
+                      Continue to the scan <ArrowRight size={16} />
+                    </button>
+                  </div>
+                  <p className="mt-3 text-xs text-muted-foreground">No ticket and the deadline is close? Continue anyway — the scan will help you file on time and make the City produce the record.</p>
+                </div>
               ) : (
                 <TicketScan
                   form={f}
+                  scanValues={scanValues}
                   daysLeft={daysLeft}
                   deadlineDays={days}
                   onResult={setScanResult}
                   onProceed={onScanProceed}
+                  onProvideValue={onProvideScanValue}
                 />
               )}
             </div>

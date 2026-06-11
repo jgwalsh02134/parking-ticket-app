@@ -235,6 +235,102 @@ export function computeScanResult(
   };
 }
 
+// ============================================================================
+// USER-ASSISTED PORTAL PULL — deterministic paste parser
+// ----------------------------------------------------------------------------
+// The official portal (albany.rmcpay.com) is CAPTCHA/WAF-protected and must NOT
+// be fetched/scraped. Instead the user pastes their citation-detail text and we
+// parse it HERE, on-device, with conservative label matching. Anything we can't
+// confidently match is left empty ("not shown") — never guessed or fabricated.
+// ============================================================================
+
+export type ParsedCitation = {
+  form: Partial<TicketForm>;          // values that map to existing form fields
+  scanValues: Record<string, string>; // scan-only fields (plateType, bodyType, …)
+};
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Grab the value after a "Label: value" (or "Label  value") pair, case-insensitive.
+function grab(text: string, labels: string[]): string {
+  for (const label of labels) {
+    const re = new RegExp(`(?:^|\\n)[\\t ]*${escapeRe(label)}[\\t ]*[:#\\-]?[\\t ]*(.+)`, "i");
+    const m = text.match(re);
+    if (m && m[1]) {
+      const v = m[1].split(/\n/)[0].trim();
+      if (v && !/^[:#\-]+$/.test(v)) return v;
+    }
+  }
+  return "";
+}
+
+// Conservatively normalize a US date to YYYY-MM-DD; return "" if not confident.
+function normDate(s: string): string {
+  const m = s.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
+  if (!m) {
+    const iso = s.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+    return iso ? `${iso[1]}-${iso[2]}-${iso[3]}` : "";
+  }
+  const mm = m[1].padStart(2, "0");
+  const dd = m[2].padStart(2, "0");
+  const year = m[3].length === 2 ? `20${m[3]}` : m[3];
+  if (+mm < 1 || +mm > 12 || +dd < 1 || +dd > 31) return "";
+  return `${year}-${mm}-${dd}`;
+}
+
+export function parseCitationText(text: string): ParsedCitation {
+  const form: Partial<TicketForm> = {};
+  const scanValues: Record<string, string> = {};
+  if (!text || !text.trim()) return { form, scanValues };
+
+  const ticket = grab(text, ["citation number", "citation no", "citation #", "citation", "ticket number", "ticket no", "ticket #", "violation number", "notice number"]);
+  if (ticket) form.ticket = ticket;
+
+  const plate = grab(text, ["license plate", "plate number", "plate designation", "plate no", "license plate number", "plate"]);
+  if (plate) form.plate = plate;
+
+  const state = grab(text, ["state of registration", "plate state", "registration state", "state"]);
+  if (state) form.state = state.toUpperCase().length <= 3 ? state.toUpperCase() : state;
+
+  const make = grab(text, ["vehicle make", "make"]);
+  if (make) form.make = make;
+
+  const model = grab(text, ["vehicle model", "model"]);
+  if (model) form.model = model;
+
+  const rawDate = grab(text, ["violation date", "date of violation", "issue date", "date"]);
+  const vdate = normDate(rawDate || text);
+  if (vdate) form.vdate = vdate;
+
+  const time = grab(text, ["violation time", "time of violation", "issue time", "time"]);
+  if (time) form.vtime = time;
+
+  const location = grab(text, ["location", "place of occurrence", "violation location", "address", "street"]);
+  if (location) form.location = location;
+
+  const violation = grab(text, ["violation description", "violation code", "violation", "charge", "infraction"]);
+  if (violation) form.violation = violation;
+
+  const amount = grab(text, ["amount due", "fine amount", "amount", "total due", "fine"]);
+  if (amount) form.amount = amount;
+
+  // Scan-only fields (no slot in TicketForm) — surfaced as printed values in the scan.
+  const plateType = grab(text, ["plate type"]);
+  if (plateType) scanValues.plateType = plateType;
+  const regExp = grab(text, ["registration expiration", "expiration date", "reg expiration", "expires"]);
+  if (regExp) scanValues.regExpiration = regExp;
+  const bodyType = grab(text, ["body type", "body", "vehicle body"]);
+  if (bodyType) scanValues.bodyType = bodyType;
+  const meter = grab(text, ["meter number", "meter no", "meter #", "meter"]);
+  if (meter) scanValues.meterNumber = meter;
+  const officer = grab(text, ["officer", "officer id", "badge", "shield", "issuer", "issued by"]);
+  if (officer) scanValues.officerId = officer;
+  const daysHours = grab(text, ["days/hours", "days and hours", "hours in effect", "in effect"]);
+  if (daysHours) scanValues.daysHours = daysHours;
+
+  return { form, scanValues };
+}
+
 // Map confirmed scan grounds into the letter generator's neutral shape.
 // Tier-1 leads; Tier-2 follows. Tier-3 is never included.
 export function toLetterGrounds(result: ScanResult): LetterGround[] {

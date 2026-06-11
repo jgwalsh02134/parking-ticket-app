@@ -6,7 +6,7 @@ import {
 import type { TicketForm } from "@/lib/appeal";
 import {
   TIER1_FIELDS, TIER2_GROUNDS, TIER3_TRAPS, visibleTier1Fields,
-  computeScanResult, type Verdict, type ScanContext, type ScanResult,
+  computeScanResult, type Verdict, type ScanContext, type ScanResult, type ScanField,
 } from "@/lib/ticketScan";
 
 type Phase = "intro" | "tier1" | "tier2" | "tier3" | "summary";
@@ -14,15 +14,17 @@ type ProceedMode = "dismissal" | "demand" | "situation";
 
 type Props = {
   form: TicketForm;
+  scanValues: Record<string, string>;
   daysLeft: number | null;
   deadlineDays: number;
   onResult: (r: ScanResult) => void;
   onProceed: (mode: ProceedMode) => void;
+  onProvideValue: (field: ScanField, value: string) => void;
 };
 
 const inputCls = "w-full rounded-md border border-input bg-secondary/40 px-3 py-2.5 text-sm";
 
-export default function TicketScan({ form, daysLeft, deadlineDays, onResult, onProceed }: Props) {
+export default function TicketScan({ form, scanValues, daysLeft, deadlineDays, onResult, onProceed, onProvideValue }: Props) {
   const [phase, setPhase] = useState<Phase>("intro");
   const [idx, setIdx] = useState(0);
   const [ctx, setCtx] = useState<ScanContext>({ isExpiredMeter: false, isPostedSign: false });
@@ -91,7 +93,7 @@ export default function TicketScan({ form, daysLeft, deadlineDays, onResult, onP
   // ---- Tier 1 walk -------------------------------------------------------
   if (phase === "tier1") {
     const field = fields[idx];
-    const printed = field.formField ? (form[field.formField] as string) : "";
+    const printed = (field.formField ? (form[field.formField] as string) : "") || scanValues[field.id] || "";
     const v = verdicts[field.id];
     const missingOnly = field.conditional === "missing-only";
     const goNext = () => { if (idx + 1 < fields.length) setIdx(idx + 1); else setPhase("tier2"); };
@@ -112,10 +114,22 @@ export default function TicketScan({ form, daysLeft, deadlineDays, onResult, onP
         <p className="mt-1 text-sm text-muted-foreground">{field.why}</p>
 
         <div className="mt-4 rounded-lg border border-border bg-secondary/30 px-4 py-3 text-sm">
-          <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">On your ticket it says</span>
-          <div className="mt-1 font-mono font-semibold" data-testid="scan-printed-value">
-            {printed ? printed : <span className="font-sans font-normal text-muted-foreground">— not captured; check your physical ticket —</span>}
-          </div>
+          <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">On your record it says</span>
+          {printed ? (
+            <div className="mt-1 font-mono font-semibold" data-testid="scan-printed-value">{printed}</div>
+          ) : (
+            <div className="mt-1" data-testid="scan-printed-value">
+              <span className="text-muted-foreground">Not shown on the record you pulled.</span>
+              <input
+                className="mt-2 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value=""
+                onChange={(e) => onProvideValue(field, e.target.value)}
+                placeholder={`If you know the ${field.label.toLowerCase()}, type it here (optional)`}
+                data-testid="scan-provide-value"
+              />
+              <p className="mt-1 text-xs text-muted-foreground">Leave blank to make the City produce it — don't guess.</p>
+            </div>
+          )}
         </div>
 
         <div className="mt-4 text-sm font-semibold">Is this correct on your ticket?</div>
@@ -148,7 +162,7 @@ export default function TicketScan({ form, daysLeft, deadlineDays, onResult, onP
           )}
           <button onClick={() => { setVerdict(field.id, "unknown"); goNext(); }} data-testid="scan-verdict-unknown"
             className={`flex items-center gap-2 rounded-lg border p-3 text-left text-sm transition hover-elevate ${v === "unknown" ? "border-border bg-secondary ring-1 ring-border" : "border-border bg-secondary/30"}`}>
-            <HelpCircle size={16} className="text-muted-foreground" /> Can't tell / I don't have the ticket
+            <HelpCircle size={16} className="text-muted-foreground" /> {printed ? "Can't tell" : "Not shown — make the City produce it"}
           </button>
         </div>
 
