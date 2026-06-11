@@ -5,25 +5,32 @@ import {
   MessageSquare, Loader2, X, CheckCircle2, Scale, ExternalLink,
   FolderOpen, FileSearch, Send, ArrowLeft, Printer, Gavel,
   Search, Camera, Building2, Sparkles, Undo2,
-  Lock, RotateCcw, ArrowRight, Paperclip,
+  Lock, RotateCcw, ArrowRight, Paperclip, ScanLine,
 } from "lucide-react";
 import { apiRequest, apiRequestRaw } from "@/lib/queryClient";
 import { storageAvailable, loadState, saveState, clearState } from "@/lib/persist";
 import {
   TicketForm, emptyForm, SITUATIONS, DEFENSES, strengthLabel,
   fmtDate, deadlineInfo, buildLetter, BUREAU_AUTHORITY,
+  buildDismissalLetter, buildDemandProofLetter,
   FoilForm, emptyFoil, FOIL_RECORDS, suggestedFoilRecords,
   FOIL_AUTHORITY, FOIL_CONTACT, buildFoilLetter,
   FoilAppealForm, emptyFoilAppeal, FOIL_APPEAL_REASONS, FoilAppealReason,
   FOIL_APPEAL_AUTHORITY, FOIL_APPEAL_CONTACT, buildFoilAppealLetter,
   LOOKUP_STATES, LOOKUP_PORTAL, resolveLookupState,
 } from "@/lib/appeal";
+import TicketScan from "@/components/ticket-scan";
+import { toLetterGrounds, type ScanResult } from "@/lib/ticketScan";
 
 const ICONS: Record<string, any> = {
   Receipt, Car, Signpost, ParkingMeter, FileText, TriangleAlert, HeartPulse, MessageSquare,
 };
 
-const STEPS = ["Ticket", "Situation", "Defense", "Appeal"];
+// Wizard stages. The Scan stage (dismissal-first error scan) is the core
+// defense-discovery step, inserted between Situation and Defense.
+const STEP = { TICKET: 0, SITUATION: 1, SCAN: 2, DEFENSE: 3, APPEAL: 4 } as const;
+const STEPS = ["Ticket", "Situation", "Scan", "Defense", "Appeal"];
+type LetterMode = "situation" | "dismissal" | "demand";
 
 // Print a plain-text letter as a clean, printable page the browser can save as PDF.
 // Works inside the sandboxed iframe by writing into a hidden iframe and printing it.
@@ -116,10 +123,14 @@ export default function Home() {
   );
   const [fapCopied, setFapCopied] = useState(false);
 
-  // Check my open tickets (official portal hand-off)
+  // Check my open tickets (official portal hand-off). The portal accepts three
+  // resident-facing lookup methods; we collect the value, copy it, and hand off.
   const [lookupMode, setLookupMode] = useState(false);
+  const [lkMethod, setLkMethod] = useState<"plate" | "citation" | "vin">("plate");
   const [lkPlate, setLkPlate] = useState("");
   const [lkState, setLkState] = useState("NY");
+  const [lkCitation, setLkCitation] = useState("");
+  const [lkVin, setLkVin] = useState("");
   const [lkCopied, setLkCopied] = useState(false);
 
   // AI situation matcher (xAI Grok) — classifies a plain-English description
@@ -134,16 +145,36 @@ export default function Home() {
   const [polished, setPolished] = useState<string | null>(null);
   const [polishMsg, setPolishMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
+  // Dismissal-first Ticket Error Scan → letter wiring. letterMode decides which
+  // builder the Appeal step uses; scanResult holds the confirmed grounds.
+  const [letterMode, setLetterMode] = useState<LetterMode>("situation");
+  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+
   const setField = (k: keyof TicketForm) => (e: any) =>
     setF((p) => ({ ...p, [k]: e.target.value }));
 
   const { days, deadline, daysLeft } = useMemo(() => deadlineInfo(f), [f.vdate, f.isCamera]);
   const def = sit ? DEFENSES[sit] : null;
-  const letter = useMemo(() => (sit ? buildLetter(f, sit) : ""), [f, sit]);
+  const scanGrounds = useMemo(() => (scanResult ? toLetterGrounds(scanResult) : []), [scanResult]);
+  // The appeal letter is built from whichever path the user took: a dismissal
+  // built around scan grounds, a deadline-driven demand-for-proof, or the
+  // situation-picker fallback.
+  const letter = useMemo(() => {
+    if (letterMode === "dismissal" && scanGrounds.length) return buildDismissalLetter(f, scanGrounds);
+    if (letterMode === "demand") return buildDemandProofLetter(f);
+    return sit ? buildLetter(f, sit) : "";
+  }, [letterMode, scanGrounds, f, sit]);
   // A polished version goes stale the moment the underlying letter changes.
   useEffect(() => { setPolished(null); setPolishMsg(null); }, [letter]);
   const displayLetter = polished ?? letter;
   const canStep1 = f.ticket && f.vdate;
+
+  // Hand-off from the scan: set the letter strategy and move to the Defense step.
+  const onScanProceed = (mode: LetterMode) => {
+    setLetterMode(mode);
+    setStep(STEP.DEFENSE);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
   const foilLetter = useMemo(() => buildFoilLetter(f, sit || "", foil), [f, sit, foil]);
 
   // Autosave in-progress work to the browser (never to a server). No-ops when
@@ -195,20 +226,25 @@ export default function Home() {
   };
   const closeLookup = () => { setLookupMode(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const lkResolvedState = resolveLookupState(lkState);
-  const lkCopyPlate = () => {
-    if (navigator.clipboard && lkPlate) navigator.clipboard.writeText(lkPlate.trim().toUpperCase());
+  // The single value the resident copies depends on the chosen lookup method.
+  const lkValue =
+    lkMethod === "plate" ? lkPlate.trim().toUpperCase()
+    : lkMethod === "citation" ? lkCitation.trim()
+    : lkVin.trim().toUpperCase();
+  // Plate lookups also need a state picked from the portal dropdown.
+  const lkReady = lkMethod === "plate" ? Boolean(lkValue && lkResolvedState) : Boolean(lkValue);
+  const lkCopyValue = () => {
+    if (navigator.clipboard && lkValue) navigator.clipboard.writeText(lkValue);
     setLkCopied(true);
     setTimeout(() => setLkCopied(false), 1800);
   };
-  // Copy the plate for convenience. The actual navigation is handled by a real
-  // <a target="_blank"> element, NOT window.open() — programmatic window.open is
-  // blocked by Cross-Origin-Opener-Policy when the app runs inside a cross-origin
-  // iframe (observed in Safari: “Navigation was blocked by Cross-Origin-Opener-Policy”).
-  const lkOnOpenPortal = () => {
-    if (navigator.clipboard && lkPlate) navigator.clipboard.writeText(lkPlate.trim().toUpperCase());
-    setLkCopied(true);
-    setTimeout(() => setLkCopied(false), 1800);
-  };
+  // Copy the lookup value for convenience. The actual navigation is handled by a
+  // real <a target="_blank"> element, NOT window.open() — programmatic
+  // window.open is blocked by Cross-Origin-Opener-Policy when the app runs
+  // inside a cross-origin iframe (observed in Safari).
+  const lkOnOpenPortal = () => { lkCopyValue(); };
+  const lkMethodLabel =
+    lkMethod === "plate" ? "License plate" : lkMethod === "citation" ? "Citation number" : "VIN";
   const fapCopy = () => {
     if (navigator.clipboard) navigator.clipboard.writeText(foilAppealLetter);
     setFapCopied(true);
@@ -375,7 +411,7 @@ export default function Home() {
     window.open(`mailto:parkingticketappeal@albanyny.gov?subject=${subject}&body=${body}`, "_blank");
   };
 
-  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkPlate(""); setLkState("NY"); setAiDesc(""); setAiMatchMsg(null); setPolished(null); setPolishMsg(null); setTriedContinue(false); clearState(); setHasSaved(false); };
+  const reset = () => { setStep(0); setSit(null); setF(emptyForm); setPreview(null); setUploadMsg(null); setFoilMode(false); setFoil(emptyFoil); setFoilSubmitMsg(null); setAppealMode(false); setFap(emptyFoilAppeal); setLookupMode(false); setLkMethod("plate"); setLkPlate(""); setLkState("NY"); setLkCitation(""); setLkVin(""); setAiDesc(""); setAiMatchMsg(null); setPolished(null); setPolishMsg(null); setTriedContinue(false); setLetterMode("situation"); setScanResult(null); clearState(); setHasSaved(false); };
 
   const inputCls = "w-full rounded-md border border-input bg-secondary/40 px-3 py-2.5 text-sm focus:border-primary focus:bg-background focus:outline-none focus:ring-2 focus:ring-primary/25 transition";
   const labelCls = "block text-sm font-semibold mb-1.5";
@@ -448,80 +484,131 @@ export default function Home() {
                 <span className="grid h-9 w-9 place-items-center rounded-md bg-primary/10 text-primary"><Search size={20} /></span>
                 <h2 className="text-xl font-semibold">Check my open parking tickets</h2>
               </div>
-              <p className="mb-6 text-sm text-muted-foreground">
+              <p className="mb-5 text-sm text-muted-foreground">
                 The City of Albany lets you see every open parking citation tied to your vehicle on its official
                 <a className="text-primary underline decoration-dotted" href={LOOKUP_PORTAL.parkingUrl} target="_blank" rel="noopener"> Ticketing &amp; Enforcement portal</a>.
-                Enter your plate and state below — we'll copy your plate so you just paste it on the portal, no retyping.
+                Pick how you want to look it up — we'll copy the value so you just paste it on the portal, no retyping.
               </p>
 
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div>
-                  <label className={labelCls} htmlFor="lk-plate">License plate</label>
-                  <input id="lk-plate" className={inputCls} value={lkPlate}
-                    onChange={(e) => setLkPlate(e.target.value)}
-                    placeholder="e.g. ABC1234" autoCapitalize="characters" data-testid="input-lookup-plate" />
-                </div>
-                <div>
-                  <label className={labelCls} htmlFor="lk-state">State / province</label>
-                  <select id="lk-state" className={inputCls} value={lkState}
-                    onChange={(e) => setLkState(e.target.value)} data-testid="select-lookup-state">
-                    {LOOKUP_STATES.map((s) => (
-                      <option key={s.id} value={s.abbr}>{s.name}</option>
-                    ))}
-                  </select>
+              {/* Lookup method selector — mirrors the portal's own search options */}
+              <div className="mb-5">
+                <label className={labelCls}>How do you want to look it up?</label>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {([
+                    { id: "plate", label: "License plate", sub: "Plate + state" },
+                    { id: "citation", label: "Citation number", sub: "From your ticket" },
+                    { id: "vin", label: "VIN", sub: "Vehicle ID number" },
+                  ] as const).map((o) => {
+                    const on = lkMethod === o.id;
+                    return (
+                      <button key={o.id} onClick={() => { setLkMethod(o.id); setLkCopied(false); }} data-testid={`lookup-method-${o.id}`}
+                        className={`rounded-lg border p-3 text-left transition hover-elevate ${on ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border bg-secondary/30"}`}>
+                        <div className="text-sm font-semibold">{o.label}</div>
+                        <div className="text-xs text-muted-foreground">{o.sub}</div>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
-              {/* Ready-to-paste card — the exact values to enter on the portal.
-                  The plate is copied to the clipboard; the state must be picked
-                  from the portal's dropdown (you can't paste into a <select>),
-                  so we show its exact name. */}
+              {lkMethod === "plate" && (
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className={labelCls} htmlFor="lk-plate">License plate</label>
+                    <input id="lk-plate" className={inputCls} value={lkPlate}
+                      onChange={(e) => setLkPlate(e.target.value)}
+                      placeholder="e.g. ABC1234" autoCapitalize="characters" data-testid="input-lookup-plate" />
+                  </div>
+                  <div>
+                    <label className={labelCls} htmlFor="lk-state">State / province</label>
+                    <select id="lk-state" className={inputCls} value={lkState}
+                      onChange={(e) => setLkState(e.target.value)} data-testid="select-lookup-state">
+                      {LOOKUP_STATES.map((s) => (
+                        <option key={s.id} value={s.abbr}>{s.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              {lkMethod === "citation" && (
+                <div>
+                  <label className={labelCls} htmlFor="lk-citation">Citation / ticket number</label>
+                  <input id="lk-citation" className={inputCls} value={lkCitation}
+                    onChange={(e) => setLkCitation(e.target.value)}
+                    placeholder="e.g. 1234567" data-testid="input-lookup-citation" />
+                </div>
+              )}
+
+              {lkMethod === "vin" && (
+                <div>
+                  <label className={labelCls} htmlFor="lk-vin">VIN (Vehicle Identification Number)</label>
+                  <input id="lk-vin" className={inputCls} value={lkVin}
+                    onChange={(e) => setLkVin(e.target.value)}
+                    placeholder="17 characters, e.g. 1HGCM82633A004352" autoCapitalize="characters" data-testid="input-lookup-vin" />
+                </div>
+              )}
+
+              {/* Ready-to-paste card — the exact value(s) to enter on the portal.
+                  The lookup value is copied to the clipboard; for a plate lookup
+                  the state must be picked from the portal's dropdown (you can't
+                  paste into a <select>), so we show its exact name. */}
               <div className="mt-6 rounded-xl border border-primary/40 bg-primary/5 p-4" data-testid="card-lookup-paste">
-                <div className="mb-3 text-sm font-semibold">Enter these on the portal</div>
+                <div className="mb-3 text-sm font-semibold">Enter {lkMethod === "plate" ? "these" : "this"} on the portal</div>
                 <div className="flex flex-wrap items-end gap-4">
                   <div className="flex-1 min-w-[12rem]">
-                    <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">License plate — paste this</div>
+                    <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{lkMethodLabel} — paste this</div>
                     <div className="flex items-center gap-2">
-                      <code className="rounded-md border border-border bg-background px-3 py-2 font-mono text-lg font-bold tracking-widest" data-testid="text-lookup-plate-big">
-                        {lkPlate ? lkPlate.trim().toUpperCase() : "—"}
+                      <code className="rounded-md border border-border bg-background px-3 py-2 font-mono text-lg font-bold tracking-widest" data-testid="text-lookup-value-big">
+                        {lkValue || "—"}
                       </code>
-                      <button onClick={lkCopyPlate} disabled={!lkPlate} data-testid="button-lookup-copy"
+                      <button onClick={lkCopyValue} disabled={!lkValue} data-testid="button-lookup-copy"
                         className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-xs font-semibold hover-elevate disabled:opacity-40 disabled:cursor-not-allowed">
                         {lkCopied ? <><Check size={14} className="text-accent" /> Copied</> : <><Copy size={14} /> Copy</>}
                       </button>
                     </div>
                   </div>
-                  <div className="min-w-[10rem]">
-                    <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">State — select this</div>
-                    <div className="rounded-md border border-border bg-background px-3 py-2 text-sm font-semibold" data-testid="text-lookup-state-big">
-                      {lkResolvedState ? lkResolvedState.name : "—"}
+                  {lkMethod === "plate" && (
+                    <div className="min-w-[10rem]">
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">State — select this</div>
+                      <div className="rounded-md border border-border bg-background px-3 py-2 text-sm font-semibold" data-testid="text-lookup-state-big">
+                        {lkResolvedState ? lkResolvedState.name : "—"}
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
               </div>
 
-              {/* What you'll do on the portal */}
+              {/* What you'll do on the portal — steps adapt to the chosen method */}
               <div className="mt-4 rounded-xl border border-border bg-secondary/30 p-4">
                 <div className="mb-2 text-sm font-semibold">What happens next</div>
                 <ol className="space-y-1.5 text-sm text-muted-foreground">
-                  <li>1. Press <b>Open the City portal</b> — it opens in a new tab and your plate is copied automatically.</li>
-                  <li>2. In the box labeled <b>“To see all open citations for your vehicle…”</b>, paste your plate (⌘/Ctrl+V) and pick <b className="text-foreground">{lkResolvedState ? lkResolvedState.name : "your state"}</b> from the dropdown.</li>
+                  <li>1. Press <b>Open the City portal</b> — it opens in a new tab and your {lkMethodLabel.toLowerCase()} is copied automatically.</li>
+                  {lkMethod === "plate" && (
+                    <li>2. In the box labeled <b>“To see all open citations for your vehicle…”</b>, paste your plate (⌘/Ctrl+V) and pick <b className="text-foreground">{lkResolvedState ? lkResolvedState.name : "your state"}</b> from the dropdown.</li>
+                  )}
+                  {lkMethod === "citation" && (
+                    <li>2. In the box labeled <b>“If you know your citation number, enter it here:”</b>, paste your citation number (⌘/Ctrl+V).</li>
+                  )}
+                  {lkMethod === "vin" && (
+                    <li>2. In the box labeled <b>“To see all open citations for your vehicle, enter your VIN number here:”</b>, paste your VIN (⌘/Ctrl+V).</li>
+                  )}
                   <li>3. Complete the quick “Human Verification” check, then press <b>Search</b>.</li>
-                  <li>4. Every open citation, its status, and the amount due will appear.</li>
+                  <li>4. {lkMethod === "citation" ? "Your citation, its status, and the amount due will appear." : "Every open citation, its status, and the amount due will appear."}</li>
                 </ol>
               </div>
 
               <div className="mt-5 flex flex-wrap gap-3">
-                {lkPlate ? (
+                {lkReady ? (
                   <a href={LOOKUP_PORTAL.parkingUrl} target="_blank" rel="noopener noreferrer"
                     onClick={lkOnOpenPortal} data-testid="button-lookup-open"
                     className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">
-                    <ExternalLink size={16} /> Open the City portal &amp; copy my plate
+                    <ExternalLink size={16} /> Open the City portal &amp; copy my {lkMethodLabel.toLowerCase()}
                   </a>
                 ) : (
                   <button disabled data-testid="button-lookup-open-disabled"
                     className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground opacity-40 cursor-not-allowed">
-                    <ExternalLink size={16} /> Enter your plate first
+                    <ExternalLink size={16} /> {lkMethod === "plate" ? "Enter your plate & state first" : `Enter your ${lkMethodLabel.toLowerCase()} first`}
                   </button>
                 )}
               </div>
@@ -912,10 +999,23 @@ export default function Home() {
           )}
 
           {/* STEP 1 — situation */}
-          {step === 1 && (
+          {step === STEP.SITUATION && (
             <div>
               <h2 className="mb-1 text-xl font-semibold">What best describes your situation?</h2>
-              <p className="mb-6 text-sm text-muted-foreground">Pick the one that fits best. We'll turn it into the right legal argument.</p>
+              <p className="mb-5 text-sm text-muted-foreground">Optional — pick what fits, or go straight to the error scan, which is the strongest way to get a ticket dismissed.</p>
+
+              {/* Primary path: the dismissal-first error scan */}
+              <button onClick={() => { setStep(STEP.SCAN); window.scrollTo({ top: 0, behavior: "smooth" }); }} data-testid="button-go-scan"
+                className="mb-5 flex w-full items-center gap-4 rounded-xl border border-primary/40 bg-primary/5 p-4 text-left transition hover-elevate">
+                <span className="grid h-11 w-11 shrink-0 place-items-center rounded-md bg-primary/10 text-primary"><ScanLine size={22} /></span>
+                <div className="flex-1">
+                  <div className="text-sm font-semibold">Scan my ticket for a dismissal <span className="ml-1 rounded-full bg-accent/15 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-accent">Recommended</span></div>
+                  <div className="text-xs leading-snug text-muted-foreground">We check the ticket's required fields for a defect that forces a mandatory dismissal under NY law — strongest first.</div>
+                </div>
+                <span className="shrink-0 text-primary"><ArrowRight size={18} /></span>
+              </button>
+
+              <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Or tell us what happened (fallback)</div>
               <div className="space-y-3">
                 {SITUATIONS.map((s) => {
                   const Ic = ICONS[s.icon];
@@ -961,15 +1061,46 @@ export default function Home() {
               </div>
 
               <div className="mt-8 flex items-center justify-between">
-                <button onClick={() => setStep(0)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
-                <button disabled={!sit} onClick={() => setStep(2)} data-testid="button-continue-2"
-                  className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate disabled:opacity-40">Continue →</button>
+                <button onClick={() => setStep(STEP.TICKET)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
+                <button onClick={() => { setStep(STEP.SCAN); window.scrollTo({ top: 0, behavior: "smooth" }); }} data-testid="button-continue-2"
+                  className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">Next: scan my ticket →</button>
               </div>
             </div>
           )}
 
-          {/* STEP 2 — defense */}
-          {step === 2 && def && (
+          {/* STEP 2 — Ticket Error Scan (dismissal-first defense discovery) */}
+          {step === STEP.SCAN && (
+            <div data-testid="step-scan">
+              {f.isCamera ? (
+                <div data-testid="scan-camera-skip">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="grid h-9 w-9 place-items-center rounded-md bg-primary/10 text-primary"><Camera size={20} /></span>
+                    <h2 className="text-xl font-semibold">Camera tickets skip the scan</h2>
+                  </div>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    This is a red-light or school-zone speed camera ticket. Those run under a different law (VTL § 1111-a / § 1180-f) and the parking-ticket field scan does not apply.
+                    Review the video and appeal at <a className="text-primary underline decoration-dotted" href="https://www.viewcitation.com" target="_blank" rel="noopener noreferrer">viewcitation.com</a> or by phone at 1-855-427-0455.
+                  </p>
+                  <div className="mt-6 flex items-center justify-between">
+                    <button onClick={() => setStep(STEP.SITUATION)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
+                    <button onClick={() => onScanProceed("situation")} data-testid="scan-camera-continue"
+                      className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">Continue to a written statement →</button>
+                  </div>
+                </div>
+              ) : (
+                <TicketScan
+                  form={f}
+                  daysLeft={daysLeft}
+                  deadlineDays={days}
+                  onResult={setScanResult}
+                  onProceed={onScanProceed}
+                />
+              )}
+            </div>
+          )}
+
+          {/* STEP 3 — defense (situation-picker fallback path) */}
+          {step === STEP.DEFENSE && letterMode === "situation" && def && (
             <div>
               <h2 className="mb-1 text-xl font-semibold">Your strongest defense</h2>
               <p className="mb-6 text-sm text-muted-foreground">Here's the argument we'll build, and exactly what to attach to make it stick.</p>
@@ -1018,15 +1149,88 @@ export default function Home() {
                 <p className="mt-1 text-xs text-muted-foreground">Keep it factual. Avoid admitting you violated the rule.</p>
               </div>
               <div className="mt-8 flex items-center justify-between">
-                <button onClick={() => setStep(1)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
-                <button onClick={() => setStep(3)} data-testid="button-generate"
+                <button onClick={() => setStep(STEP.SCAN)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
+                <button onClick={() => setStep(STEP.APPEAL)} data-testid="button-generate"
                   className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">Generate my appeal →</button>
               </div>
             </div>
           )}
 
-          {/* STEP 3 — appeal */}
-          {step === 3 && (
+          {/* STEP 3 — defense fallback when situation path chosen but nothing picked */}
+          {step === STEP.DEFENSE && letterMode === "situation" && !def && (
+            <div data-testid="defense-empty">
+              <h2 className="mb-1 text-xl font-semibold">Pick how you'll argue it</h2>
+              <p className="mb-5 text-sm text-muted-foreground">You haven't selected a situation yet. Run the dismissal scan (recommended) or choose a situation to build your appeal around.</p>
+              <div className="flex flex-wrap gap-3">
+                <button onClick={() => setStep(STEP.SCAN)} data-testid="defense-empty-scan"
+                  className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate"><ScanLine size={16} /> Scan my ticket</button>
+                <button onClick={() => setStep(STEP.SITUATION)} data-testid="defense-empty-situation"
+                  className="inline-flex items-center gap-2 rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">Pick a situation</button>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 3 — dismissal / demand-proof lead argument (from the scan) */}
+          {step === STEP.DEFENSE && (letterMode === "dismissal" || letterMode === "demand") && (
+            <div data-testid="defense-scan">
+              <h2 className="mb-1 text-xl font-semibold">{letterMode === "dismissal" ? "Your dismissal argument" : "File on time & put the City to its proof"}</h2>
+              <p className="mb-5 text-sm text-muted-foreground">
+                {letterMode === "dismissal"
+                  ? "We'll lead your appeal with the ground(s) below and demand dismissal. Add any details, then generate your letter."
+                  : "You don't have the ticket in hand and the clock is short. We'll file a not-guilty plea now and make the City produce the citation and prove every required element — then you can scan what they produce."}
+              </p>
+
+              {letterMode === "dismissal" && scanResult && scanResult.tier1.length > 0 && (
+                <div className="rounded-xl border border-accent/40 bg-accent/5 p-5" data-testid="defense-scan-tier1">
+                  <h4 className="mb-2 flex flex-wrap items-center gap-3 text-base font-semibold">
+                    Mandatory-dismissal ground{scanResult.tier1.length > 1 ? "s" : ""}
+                    <span className="rounded-full bg-accent/15 px-3 py-0.5 text-xs font-bold uppercase tracking-wide text-accent">T1 · Often accepted</span>
+                  </h4>
+                  <ul className="space-y-2">
+                    {scanResult.tier1.map(({ field }) => (
+                      <li key={field.id} className="text-sm">
+                        <div className="font-semibold">{field.label}</div>
+                        <a href={field.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-primary hover:underline">{field.citation}<ExternalLink size={11} /></a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {letterMode === "dismissal" && scanResult && scanResult.tier2.length > 0 && (
+                <div className="mt-4 rounded-xl border border-border bg-secondary/30 p-5" data-testid="defense-scan-tier2">
+                  <h4 className="mb-2 text-base font-semibold">Bring this proof</h4>
+                  <ul className="space-y-2">
+                    {scanResult.tier2.map((g) => (
+                      <li key={g.id} className="text-sm"><div className="font-semibold">{g.label}</div><div className="text-xs text-muted-foreground">{g.citation} · <b>Proof:</b> {g.proofNeeded}</div></li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {letterMode === "demand" && (
+                <div className="rounded-xl border border-border bg-secondary/30 p-5 text-sm text-muted-foreground" data-testid="defense-demand">
+                  Your letter will plead NOT GUILTY, demand the City prove the charge by substantial evidence (VTL § 240(2)(b)), and reserve the right to inspect the officer's record (VTL § 240(2)(d)) and to seek dismissal under § 238(2-a)(b) once the citation is produced.
+                </div>
+              )}
+
+              <div className="mt-5">
+                <label className={labelCls}>Add your own details <span className="font-normal text-muted-foreground/70">(optional)</span></label>
+                <textarea className={`${inputCls} min-h-24 resize-y`} value={f.facts} onChange={setField("facts")} data-testid="input-facts-scan"
+                  placeholder="In a sentence or two, add anything relevant in your own words. This gets added to your appeal." />
+                <p className="mt-1 text-xs text-muted-foreground">Keep it factual. Avoid admitting you violated the rule.</p>
+              </div>
+
+              <div className="mt-8 flex items-center justify-between">
+                <button onClick={() => setStep(STEP.SCAN)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back to scan</button>
+                <button onClick={() => setStep(STEP.APPEAL)} data-testid="button-generate-scan"
+                  className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">Generate my appeal →</button>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 4 — appeal */}
+          {step === STEP.APPEAL && (
             <div>
               <h2 className="mb-1 text-xl font-semibold">Your ready-to-send appeal</h2>
               <p className="mb-6 text-sm text-muted-foreground">Add your name and contact info, then send it. Email is the fastest channel.</p>
@@ -1140,7 +1344,7 @@ export default function Home() {
               <LegalDisclaimer className="mt-6 rounded-lg border border-dashed border-border bg-secondary/30 px-4 py-3 text-xs leading-relaxed text-muted-foreground/80" />
 
               <div className="mt-8 flex items-center justify-between">
-                <button onClick={() => setStep(2)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
+                <button onClick={() => setStep(STEP.DEFENSE)} className="rounded-md border border-border px-6 py-2.5 text-sm font-semibold hover-elevate">← Back</button>
                 <button onClick={reset} data-testid="button-reset" className="rounded-md bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover-elevate">Start another ticket</button>
               </div>
             </div>

@@ -482,6 +482,131 @@ ${f.address || "[YOUR MAILING ADDRESS]"}
 ${f.email || "[YOUR EMAIL]"}${f.phone ? `\n${f.phone}` : ""}`;
 }
 
+// ============================================================================
+// DISMISSAL-FIRST LETTERS (driven by the Ticket Error Scan)
+// ----------------------------------------------------------------------------
+// All authorities below come from VERIFIED-TICKET-DEFECT-LAW.md. These builders
+// only ASSEMBLE grounds the scan confirmed from the user's own ticket (or that
+// the City must produce); they never invent a defect or a citation.
+// ============================================================================
+
+// Neutral shape produced by ticketScan.toLetterGrounds(). Kept here (not
+// imported from ticketScan) so appeal.ts has no dependency cycle.
+export type LetterGround = {
+  tier: 1 | 2;
+  label: string;        // the exact field / fact at issue
+  citation: string;     // authority text (verbatim-consistent with the doc)
+  idElement?: boolean;  // one of the 5 mandatory ID elements (Ryder/Wheels)
+  issue?: "omitted" | "misdescribed" | "illegible"; // § 238(2-a)(b) trigger
+  requiresProof?: boolean;
+  proofNeeded?: string;
+};
+
+const ALBANY_PVB_HEADER = `City of Albany Parking Violations Bureau
+24 Eagle Street, Room 203
+Albany, NY 12207
+parkingticketappeal@albanyny.gov`;
+
+const issueWord = (i?: LetterGround["issue"]) =>
+  i === "omitted" ? "omitted from the notice"
+  : i === "misdescribed" ? "misdescribed on the notice"
+  : i === "illegible" ? "illegible on the notice"
+  : "omitted, misdescribed, or illegible on the notice";
+
+// Build the appeal AROUND the confirmed defect(s): lead with Tier-1 mandatory
+// dismissal under § 238(2-a)(b) (+ Ryder/Wheels for ID elements), then any
+// Tier-2 grounds with their required proof.
+export function buildDismissalLetter(f: TicketForm, grounds: LetterGround[]): string {
+  const today = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  const vehLine = [
+    f.plate && `License plate: ${f.plate}${f.state ? ` (${f.state})` : ""}`,
+    (f.make || f.model) && `Vehicle: ${[f.make, f.model].filter(Boolean).join(" ")}`,
+  ].filter(Boolean).join("\n");
+
+  const tier1 = grounds.filter((g) => g.tier === 1);
+  const tier2 = grounds.filter((g) => g.tier === 2);
+
+  let body = "";
+
+  if (tier1.length) {
+    const hasIdElement = tier1.some((g) => g.idElement);
+    body += `This notice of violation is defective on its face and must be dismissed. Under NY Vehicle and Traffic Law § 238(2-a)(b), "if any information which is required to be inserted on a notice of violation is omitted from the notice of violation, misdescribed, or illegible, the violation shall be dismissed upon application of the person charged with the violation."\n\n`;
+    body += `I hereby apply for that dismissal. The following required element${tier1.length > 1 ? "s are" : " is"} defective:\n`;
+    body += tier1.map((g) => `  \u2022 ${g.label} \u2014 ${issueWord(g.issue)} (${g.citation}).`).join("\n");
+    if (hasIdElement) {
+      body += `\n\nThe New York Court of Appeals has held that the five mandatory vehicle-identification elements must each be correct: an omission requires dismissal (Matter of Ryder Truck Rental v. Parking Violations Bureau, 62 N.Y.2d 667 (1984)), and a misdescription of any one of them also mandates dismissal, with no "small error" exception (Matter of Wheels, Inc. v. Parking Violations Bureau, 80 N.Y.2d 1014 (1992)).`;
+    }
+  }
+
+  if (tier2.length) {
+    body += `${tier1.length ? "\n\n" : ""}I further contest this citation on the following ground${tier2.length > 1 ? "s" : ""}:\n`;
+    body += tier2.map((g) => `  \u2022 ${g.label} (${g.citation}).${g.proofNeeded ? ` Supporting proof: ${g.proofNeeded}` : ""}`).join("\n");
+    if (!tier1.length) {
+      body += `\n\nThe City bears the burden of establishing the charge by substantial evidence (VTL § 240(2)(b)); I respectfully demand that it do so or dismiss the citation.`;
+    }
+  }
+
+  const facts = f.facts?.trim() ? `\n\nWhat happened:\n${f.facts.trim()}` : "";
+
+  return `${today}
+
+${ALBANY_PVB_HEADER}
+
+RE: Appeal of Parking Ticket No. ${f.ticket || "[TICKET NUMBER]"}
+Date of violation: ${f.vdate ? fmtDate(f.vdate) : "[DATE]"}${f.location ? `\nLocation: ${f.location}` : ""}
+
+To the Parking Violations Bureau:
+
+I am writing to enter a plea of NOT GUILTY and to formally contest the above parking ticket.
+
+${vehLine ? vehLine + "\n\n" : ""}${body}${facts}
+
+Accordingly, I respectfully request that this citation be dismissed. If a hearing is required, please advise me of the date and time so that I may appear. As a person who has demanded a hearing, I note that no fine or penalty may be imposed prior to the hearing (VTL § 240.1-a; § 241(2)).
+
+Thank you for your time and consideration.
+
+Sincerely,
+${f.name || "[YOUR NAME]"}
+${f.address || "[YOUR MAILING ADDRESS]"}
+${f.email || "[YOUR EMAIL]"}${f.phone ? `\n${f.phone}` : ""}`;
+}
+
+// No physical ticket + deadline near: file a timely NOT-GUILTY plea now and put
+// the City to its proof. The Tier-1 scan is then run against the record the
+// City produces. (Doc: "Deadline rule (overrides FOIL)".)
+export function buildDemandProofLetter(f: TicketForm): string {
+  const today = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  const vehLine = [
+    f.plate && `License plate: ${f.plate}${f.state ? ` (${f.state})` : ""}`,
+    (f.make || f.model) && `Vehicle: ${[f.make, f.model].filter(Boolean).join(" ")}`,
+  ].filter(Boolean).join("\n");
+  const facts = f.facts?.trim() ? `\n\nWhat happened:\n${f.facts.trim()}` : "";
+
+  return `${today}
+
+${ALBANY_PVB_HEADER}
+
+RE: Appeal of Parking Ticket No. ${f.ticket || "[TICKET NUMBER]"}
+Date of violation: ${f.vdate ? fmtDate(f.vdate) : "[DATE]"}${f.location ? `\nLocation: ${f.location}` : ""}
+
+To the Parking Violations Bureau:
+
+I am writing to enter a timely plea of NOT GUILTY and to contest the above parking ticket. I do not currently have the physical notice of violation in front of me, so I am filing within the appeal window and reserving my defenses.
+
+${vehLine ? vehLine + "\n\n" : ""}Because no charge may be established except upon proof by substantial evidence (VTL § 240(2)(b)), and the burden rests with the City, I respectfully demand that the City produce the notice of violation and prove each required element of the charge. I further request, pursuant to VTL § 240(2)(d), the opportunity to inspect the issuing officer's record and any book, paper, or other thing relevant to the charge, and I reserve the right to subpoena the officer who served the notice.
+
+I expressly reserve the right to seek dismissal under VTL § 238(2-a)(b) for any required element of the notice that is omitted, misdescribed, or illegible once the City produces the citation.${facts}
+
+If a hearing is required, please advise me of the date and time so that I may appear. As a person who has demanded a hearing, no fine or penalty may be imposed prior to the hearing (VTL § 240.1-a; § 241(2)).
+
+Thank you for your time and consideration.
+
+Sincerely,
+${f.name || "[YOUR NAME]"}
+${f.address || "[YOUR MAILING ADDRESS]"}
+${f.email || "[YOUR EMAIL]"}${f.phone ? `\n${f.phone}` : ""}`;
+}
+
 /* ============================================================
    FOIL DENIAL APPEAL (Public Officers Law § 89(4)(a))
    When the City denies a FOIL request, ignores it past the
